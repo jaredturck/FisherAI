@@ -7,20 +7,6 @@ import torch
 path = "lichess_db_standard_rated_2025-09.pgn.zst"
 
 lookup = ['.', 'P', 'N', 'B', 'R', 'Q', 'K']
-piece_lookup = {
-    (1,0) : 1,
-    (2,0) : 2,
-    (3,0) : 3,
-    (4,0) : 4,
-    (5,0) : 5,
-    (6,0) : 6,
-    (1,1) : 7,
-    (2,1) : 8,
-    (3,1) : 9,
-    (4,1) : 10,
-    (5,1) : 11,
-    (6,1) : 12
-}
 
 def display_board(array):
     for i in range(8):
@@ -43,7 +29,7 @@ with open(path, "rb") as fh, dctx.stream_reader(fh) as reader:
 
         board = game.board()
         moves = list(game.mainline_moves())
-        game_array = np.zeros((len(moves),8,8))
+        game_array = np.zeros((len(moves),8,8,2))
 
         for num,move in enumerate(moves):
             board.push(move)
@@ -52,7 +38,8 @@ with open(path, "rb") as fh, dctx.stream_reader(fh) as reader:
             for sq, piece in board.piece_map().items():
                 r = chess.square_rank(sq)
                 f = chess.square_file(sq)
-                game_array[num, r, f] = piece_lookup[(piece.piece_type, int(piece.color))]
+                game_array[num, r, f, 0] = piece.piece_type
+                game_array[num, r, f, 1] = int(piece.color) + 1
 
         training_data.append(game_array)
 
