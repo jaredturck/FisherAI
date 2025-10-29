@@ -7,7 +7,7 @@ import torch, os, time, datetime
 
 DATASET_PATH = 'datasets/'
 WEIGHTS_PATH = 'weights/'
-BATCH_SIZE = 8
+BATCH_SIZE = 7
 DEVICE = 'cuda'
 
 class ChessDataset(Dataset):
