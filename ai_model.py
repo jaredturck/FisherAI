@@ -1,11 +1,13 @@
+import sys
 from torch.utils.data import Dataset
 from torch.nn import Module
 from torch.nn.utils.rnn import pad_sequence
 import torch.nn as nn
-import torch, os, time
+import torch, os, time, datetime
 
 DATASET_PATH = 'datasets/'
-BATCH_SIZE = 6
+WEIGHTS_PATH = 'weights/'
+BATCH_SIZE = 8
 DEVICE = 'cuda'
 
 class ChessDataset(Dataset):
@@ -28,6 +30,8 @@ class ChessDataset(Dataset):
                     x = g[:-1]
                     y = g[1:]
                     self.training_data.append((x,y))
+        
+        print(f'[+] Loaded {len(self.training_data):,} games')
     
     def collate_fn(self, batch):
         x,y = zip(*batch)
@@ -77,14 +81,16 @@ class FisherAI(Module):
         return x
     
     def train_model(self):
-
         self.dataset.read_data()
         self.dataloader = torch.utils.data.DataLoader(self.dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=self.dataset.collate_fn)
 
         self.optimizer = torch.optim.AdamW(self.parameters(), lr=1e-4)
         loss_func = nn.CrossEntropyLoss(ignore_index=0)
+        self.load_weights()
         start = time.time()
 
+        print(f'[+] Training started, d_model={self.d_model}, nheads={self.nheads}, dim_feedforward={self.dim_feedforward}, '
+              f'layers={self.no_transformer_layers}, batch_size={BATCH_SIZE}')
         for epoch in range(100):
             total_loss = 0.0
             for n, (src, tgt) in enumerate(self.dataloader):
@@ -99,9 +105,37 @@ class FisherAI(Module):
                 loss.backward()
                 self.optimizer.step()
                 total_loss += loss.item()
+
+                if time.time() - start > 10:
+                    start = time.time()
+                    print(f'[+] Epoch {epoch+1}, batch {n+1} of {len(self.dataloader)}, loss: {loss.item():.4f}')
     
             print(f'Epoch {epoch+1}, avg loss: {total_loss / len(self.dataloader):.4f}')
+        
+    def save_weights(self):
+        fname = f'weights_{datetime.datetime.now().strftime('%d-%b-%Y_%H-%M')}.pt'
+        torch.save({
+            'weights': self.state_dict(),
+            'optimizer': self.optimizer.state_dict()
+        }, os.path.join(WEIGHTS_PATH, fname))
+    
+    def load_weights(self):
+        files = [os.path.join(WEIGHTS_PATH, file) for file in os.listdir(WEIGHTS_PATH) if file.endswith('.pt')]
+        if files:
+            max_file = max(files, key=os.path.getctime)
+            weights_data = torch.load(max_file, map_location=DEVICE)
+            if 'weights' in weights_data:
+                self.load_state_dict(weights_data)
+                print(f'[+] Loaded weights from {files}')
+
+            if 'optimizer' in weights_data:
+                self.optimizer.load_state_dict(weights_data['optimizer'])
+                print(f'[+] Loaded optimizer state from {files}')
 
 if __name__ == '__main__':
-    model = FisherAI().to(DEVICE)
-    model.train_model()
+    if sys.argv[1] == 'train':
+        try:
+            model = FisherAI().to(DEVICE)
+            model.train_model()
+        except KeyboardInterrupt:
+            model.save_weights()
