@@ -11,7 +11,7 @@ piece_lookup = {0: ' ',1: '.',2: 'p',3: 'n',4: 'b',5: 'r',6: 'q',7: 'k',8: 'P',9
 
 DATASET_PATH = 'datasets/'
 WEIGHTS_PATH = 'weights/'
-BATCH_SIZE = 6
+BATCH_SIZE = 3
 DEVICE = 'cuda'
 
 class ChessDataset(Dataset):
@@ -46,7 +46,7 @@ class ChessDataset(Dataset):
 class FisherAI(Module):
     def __init__(self):
         super().__init__()
-        self.d_model = 256
+        self.d_model = 512
         self.nheads = self.d_model // 64
         self.dim_feedforward = self.d_model * 4
         self.no_transformer_layers = self.d_model // 128
