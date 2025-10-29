@@ -20,6 +20,21 @@ dctx = zstd.ZstdDecompressor()
 start = time.time()
 save_file = 1
 
+lookup = {
+    (1,0) : 2,
+    (2,0) : 3,
+    (3,0) : 4,
+    (4,0) : 5,
+    (5,0) : 6,
+    (6,0) : 7,
+    (1,1) : 8,
+    (2,1) : 9,
+    (3,1) : 10,
+    (4,1) : 11,
+    (5,1) : 12,
+    (6,1) : 13
+}
+
 with open(path, "rb") as fh, dctx.stream_reader(fh) as reader:
     text = io.TextIOWrapper(reader, encoding="utf-8", newline="")
     while True:
@@ -29,19 +44,16 @@ with open(path, "rb") as fh, dctx.stream_reader(fh) as reader:
 
         board = game.board()
         moves = list(game.mainline_moves())
-        game_array = np.zeros((len(moves),8,8,2))
+        game_array = np.ones((len(moves),64))
 
         for num,move in enumerate(moves):
             board.push(move)
 
             # Create array of the current board state
             for sq, piece in board.piece_map().items():
-                r = chess.square_rank(sq)
-                f = chess.square_file(sq)
-                game_array[num, r, f, 0] = piece.piece_type
-                game_array[num, r, f, 1] = int(piece.color) + 1
+                game_array[num, sq] = lookup[(piece.piece_type, int(piece.color))]
 
-        training_data.append(game_array)
+        training_data.append(torch.from_numpy(game_array))
 
         if time.time() - start > 10:
             start = time.time()
