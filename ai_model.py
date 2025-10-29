@@ -3,6 +3,7 @@ from torch.utils.data import Dataset
 from torch.nn import Module
 from torch.nn.utils.rnn import pad_sequence
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 import torch, os, time, datetime, chess
 
@@ -11,7 +12,7 @@ piece_lookup = {0: ' ',1: '.',2: 'p',3: 'n',4: 'b',5: 'r',6: 'q',7: 'k',8: 'P',9
 
 DATASET_PATH = 'datasets/'
 WEIGHTS_PATH = 'weights/'
-BATCH_SIZE = 3
+BATCH_SIZE = 2
 DEVICE = 'cuda'
 
 class ChessDataset(Dataset):
@@ -160,21 +161,30 @@ class FisherAI(Module):
     
     def predict(self, fen):
         self.eval()
+        board = chess.Board(fen)
+
         tensor = self.fen_to_tensor(fen).to(DEVICE)
         with torch.no_grad():
-            output = self.forward(tensor)
-            predicted = torch.argmax(output, dim=-1).squeeze(0).cpu().numpy()
-            self.display_board(predicted)
+            logits = self.forward(tensor).squeeze(0)
+            logp = F.log_softmax(logits, dim=-1)
 
-        board = chess.Board(fen)
+        best_move, best_score, best_board = None, float('-inf'), None
 
         for move in board.legal_moves:
             b2 = board.copy(stack=False)
             b2.push(move)
-            if np.array_equal(self.encode_board(b2), predicted):
-                san = board.san(move)
-                print(f'Predicted move: {move.uci()}')
-                break
+            target = self.encode_board(b2)
+
+            idx = torch.as_tensor(target, device=logp.device, dtype=torch.long).view(-1, 1)
+            score = logp.gather(1, idx).sum().item()
+
+            if score > best_score:
+                best_score = score
+                best_move = move
+                best_board = target
+
+        print(f'Predicted move: {best_move.uci()}')
+        self.display_board(best_board)
     
     def display_board(self, array):
         array = array.reshape(8,8)
