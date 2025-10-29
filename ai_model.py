@@ -7,7 +7,7 @@ import torch, os, time, datetime
 
 DATASET_PATH = 'datasets/'
 WEIGHTS_PATH = 'weights/'
-BATCH_SIZE = 7
+BATCH_SIZE = 6
 DEVICE = 'cuda'
 
 class ChessDataset(Dataset):
@@ -88,6 +88,7 @@ class FisherAI(Module):
         loss_func = nn.CrossEntropyLoss(ignore_index=0)
         self.load_weights()
         start = time.time()
+        save_time = time.time()
 
         print(f'[+] Training started, d_model={self.d_model}, nheads={self.nheads}, dim_feedforward={self.dim_feedforward}, '
               f'layers={self.no_transformer_layers}, batch_size={BATCH_SIZE}')
@@ -109,6 +110,11 @@ class FisherAI(Module):
                 if time.time() - start > 10:
                     start = time.time()
                     print(f'[+] Epoch {epoch+1}, batch {n+1} of {len(self.dataloader)}, loss: {loss.item():.4f}')
+
+                    if time.time() - save_time > 600:
+                        save_time = time.time()
+                        self.save_weights()
+                        print('[+] Weights saved')
     
             print(f'Epoch {epoch+1}, avg loss: {total_loss / len(self.dataloader):.4f}')
         
