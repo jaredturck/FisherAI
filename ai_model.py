@@ -3,7 +3,11 @@ from torch.utils.data import Dataset
 from torch.nn import Module
 from torch.nn.utils.rnn import pad_sequence
 import torch.nn as nn
-import torch, os, time, datetime
+import numpy as np
+import torch, os, time, datetime, chess
+
+lookup = {(1,0) : 2,(2,0) : 3,(3,0) : 4,(4,0) : 5,(5,0) : 6,(6,0) : 7,(1,1) : 8,(2,1) : 9,(3,1) : 10,(4,1) : 11,(5,1) : 12,(6,1) : 13}
+piece_lookup = {0: ' ',1: '.',2: 'p',3: 'n',4: 'b',5: 'r',6: 'q',7: 'k',8: 'P',9: 'N',10: 'B',11: 'R',12: 'Q',13: 'K'}
 
 DATASET_PATH = 'datasets/'
 WEIGHTS_PATH = 'weights/'
@@ -48,6 +52,7 @@ class FisherAI(Module):
         self.no_transformer_layers = self.d_model // 128
         self.dropout = 0.1
         self.dataset = ChessDataset()
+        self.optimizer = None
         
         self.piece_embedding = nn.Embedding(14, self.d_model, padding_idx=0)
         self.position_embedding = nn.Embedding(64, self.d_model)
@@ -134,14 +139,59 @@ class FisherAI(Module):
                 self.load_state_dict(weights_data['weights'])
                 print(f'[+] Loaded weights from {max_file}')
 
-            if 'optimizer' in weights_data:
+            if self.optimizer and 'optimizer' in weights_data:
                 self.optimizer.load_state_dict(weights_data['optimizer'])
                 print(f'[+] Loaded optimizer state from {max_file}')
 
+    def fen_to_tensor(self, fen):
+        board = chess.Board(fen)
+        
+        arr = np.ones(64, dtype=np.int64)
+        for sq, sequence in board.piece_map().items():
+            arr[sq] = lookup[(sequence.piece_type, int(sequence.color))]
+        arr = arr[None, :]
+        return torch.as_tensor(arr.copy())
+    
+    def encode_board(self, b):
+        arr = np.ones(64, dtype=np.int64)
+        for sq, p in b.piece_map().items():
+            arr[sq] = lookup[(p.piece_type, int(p.color))]
+        return arr
+    
+    def predict(self, fen):
+        self.eval()
+        tensor = self.fen_to_tensor(fen).to(DEVICE)
+        with torch.no_grad():
+            output = self.forward(tensor)
+            predicted = torch.argmax(output, dim=-1).squeeze(0).cpu().numpy()
+            self.display_board(predicted)
+
+        board = chess.Board(fen)
+
+        for move in board.legal_moves:
+            b2 = board.copy(stack=False)
+            b2.push(move)
+            if np.array_equal(self.encode_board(b2), predicted):
+                san = board.san(move)
+                print(f'Predicted move: {move.uci()}')
+                break
+    
+    def display_board(self, array):
+        array = array.reshape(8,8)
+        for i in range(8):
+            print('|'.join(piece_lookup[int(array[i, j])] for j in range(8)))
+
 if __name__ == '__main__':
-    if sys.argv[1] == 'train':
+    if len(sys.argv) > 1 and sys.argv[1] == 'train':
         try:
             model = FisherAI().to(DEVICE)
             model.train_model()
         except KeyboardInterrupt:
             model.save_weights()
+    
+    else:
+        model = FisherAI().to(DEVICE)
+        model.load_weights()
+        while True:
+            fen = input('Enter FEN: ')
+            model.predict(fen)
