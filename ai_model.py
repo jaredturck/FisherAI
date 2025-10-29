@@ -131,12 +131,12 @@ class FisherAI(Module):
             max_file = max(files, key=os.path.getctime)
             weights_data = torch.load(max_file, map_location=DEVICE)
             if 'weights' in weights_data:
-                self.load_state_dict(weights_data)
-                print(f'[+] Loaded weights from {files}')
+                self.load_state_dict(weights_data['weights'])
+                print(f'[+] Loaded weights from {max_file}')
 
             if 'optimizer' in weights_data:
                 self.optimizer.load_state_dict(weights_data['optimizer'])
-                print(f'[+] Loaded optimizer state from {files}')
+                print(f'[+] Loaded optimizer state from {max_file}')
 
 if __name__ == '__main__':
     if sys.argv[1] == 'train':
