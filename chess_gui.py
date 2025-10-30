@@ -47,8 +47,6 @@ class ChessGUI:
         # Draw board
         self.add_background_img()
         self.draw_board()
-
-        # self.ai.predict(self.board_array)
     
     def draw_board(self):
         ''' Change all cells to default colors '''
@@ -78,9 +76,24 @@ class ChessGUI:
     def select_square(self):
         ''' Update selected square'''
         mx, my = pygame.mouse.get_pos()
+        col = (mx - self.border_offset) // self.cell_size
+        row = (my - self.border_offset) // self.cell_size
+        board_2d = self.board_array.reshape(8,8)
+
+        # Update move
+        moved = False
+        if self.selected_square:
+            x,y = self.selected_square
+            piece = board_2d[y, x].item()
+            board_2d[y, x] = 1
+            board_2d[row, col] = piece
+            self.board_array = board_2d.reshape(1, -1)
+            self.selected_square = None
+            moved = True
+            self.board_array = self.ai.predict(self.board_array)
+            board_2d = self.board_array.reshape(8,8)
 
         # update board cell colours on selection
-        board_2d = self.board_array.reshape(8,8)
         self.screen.blit(self.bg_img, (0, 0))
         for i in range(8):
             for j in range(8):
@@ -98,10 +111,8 @@ class ChessGUI:
                     w,h = self.pieces[piece_name].get_size()
                     self.screen.blit(self.pieces[piece_name], (x + (self.cell_size - w) // 2, y + (self.cell_size - h) // 2))
 
-        if (mx > self.border_offset and my > self.border_offset) and \
+        if not moved and (mx > self.border_offset and my > self.border_offset) and \
             (mx < self.width - self.border_offset and my < self.height - self.border_offset):
-            col = (mx - self.border_offset) // self.cell_size
-            row = (my - self.border_offset) // self.cell_size
 
             # Update selected square
             x = (col * self.cell_size) + self.border_offset
@@ -115,9 +126,8 @@ class ChessGUI:
             if piece_name != '.':
                 w,h = self.pieces[piece_name].get_size()
                 self.screen.blit(self.pieces[piece_name], (x + (self.cell_size - w) // 2, y + (self.cell_size - h) // 2))
-            
                 self.selected_square = (col, row)
-                print('Selected square updated to:', self.selected_square)
+
 
     def main_loop(self):
         while True:

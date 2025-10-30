@@ -188,7 +188,7 @@ class FisherAI(Module):
         
         self.display_board(best_board)
         
-        return torch.as_tensor(best_board, dtype=torch.long)
+        return torch.as_tensor([best_board], dtype=torch.long)
     
     def display_board(self, array):
         array = array.reshape(8,8)
