@@ -1,5 +1,5 @@
 import pygame, torch
-from ai_model import FisherAI, DEVICE
+from ai_model import FisherAI, DEVICE, piece_lookup
 
 class ChessGUI:
     def __init__(self):
@@ -20,24 +20,25 @@ class ChessGUI:
 
         self.board_array = torch.tensor([[
             11.,  9.,  10., 12., 13., 10.,  9.,  11.,  
-            8.,   8.,  8.,  8.,  1.,  8.,   8.,  8.,  
+            8.,   8.,  8.,  8.,  8.,  8.,   8.,  8.,  
             1.,   1.,  1.,  1.,  1.,  1.,   1.,  1.,  
-            1.,   1.,  1.,  1.,  8.,  1.,   1.,  1.,  
+            1.,   1.,  1.,  1.,  1.,  1.,   1.,  1.,  
             1.,   1.,  1.,  1.,  1.,  1.,   1.,  1.,  
             1.,   1.,  1.,  1.,  1.,  1.,   1.,  1., 
             2.,   2.,  2.,  2.,  2.,  2.,   2.,  2.,
             5.,   3.,  4.,  6.,  7.,  4.,   3.,  5.
         ]], dtype=torch.long)
+        self.selected_square = None
 
         # Setup piece images
-        piece_offsets = {
-            'w_pawn':(3, 59, 47, 98), 'w_king':(72, 10, 53, 146), 'w_queen':(143, 22, 54, 134), 'w_bishop':(218, 33, 48, 124), 
-            'w_rook':(284, 51, 59, 106), 'w_knight':(356, 48, 58, 109), 'b_pawn':(3, 205, 47, 97), 'b_king':(72, 156, 53, 146), 
-            'b_queen':(143, 168, 54, 134), 'b_bishop':(218, 179, 48, 123), 'b_rook':(284, 197, 59, 105), 'b_knight':(356, 194, 58, 108)
+        self.piece_offsets = {
+            'p':(3, 59, 47, 98), 'k':(72, 10, 53, 146), 'q':(143, 22, 54, 134), 'b':(218, 33, 48, 124), 
+            'r':(284, 51, 59, 106), 'n':(356, 48, 58, 109), 'P':(3, 205, 47, 97), 'K':(72, 156, 53, 146), 
+            'Q':(143, 168, 54, 134), 'B':(218, 179, 48, 123), 'R':(284, 197, 59, 105), 'N':(356, 194, 58, 108)
         }
 
         self.pieces = {}
-        for name, coords in piece_offsets.items():
+        for name, coords in self.piece_offsets.items():
             x,y,w,h = coords
             frame = self.piece_sheet.subsurface(pygame.Rect(x, y, w, h)).copy()
             scale = min((self.cell_size - 10) / w, (self.cell_size - 10) / h)
@@ -47,10 +48,11 @@ class ChessGUI:
         self.add_background_img()
         self.draw_board()
 
-        self.ai.predict(self.board_array)
+        # self.ai.predict(self.board_array)
     
     def draw_board(self):
         ''' Change all cells to default colors '''
+        board_2d = self.board_array.reshape(8,8)
         for i in range(8):
             for j in range(8):
                 x = (i * self.cell_size) + self.border_offset
@@ -62,8 +64,10 @@ class ChessGUI:
                 self.grid[i][j] = [s, color]
 
                 # Add piece
-                w,h = self.pieces['w_pawn'].get_size()
-                self.screen.blit(self.pieces['w_pawn'], (x + (self.cell_size - w) // 2, y + (self.cell_size - h) // 2))
+                piece_name = piece_lookup[int(board_2d[j][i])]
+                if piece_name != '.':
+                    w,h = self.pieces[piece_name].get_size()
+                    self.screen.blit(self.pieces[piece_name], (x + (self.cell_size - w) // 2, y + (self.cell_size - h) // 2))
 
     def add_background_img(self):
         ''' Adds a background image to the chess board '''
@@ -76,6 +80,7 @@ class ChessGUI:
         mx, my = pygame.mouse.get_pos()
 
         # update board cell colours on selection
+        board_2d = self.board_array.reshape(8,8)
         self.screen.blit(self.bg_img, (0, 0))
         for i in range(8):
             for j in range(8):
@@ -85,11 +90,18 @@ class ChessGUI:
                 self.screen.blit(s, ((i * self.cell_size) + self.border_offset, (j * self.cell_size) + self.border_offset))
                 self.grid[i][j][1] = color
 
+                # Add piece
+                x = (i * self.cell_size) + self.border_offset
+                y = (j * self.cell_size) + self.border_offset
+                piece_name = piece_lookup[int(board_2d[j][i])]
+                if piece_name != '.':
+                    w,h = self.pieces[piece_name].get_size()
+                    self.screen.blit(self.pieces[piece_name], (x + (self.cell_size - w) // 2, y + (self.cell_size - h) // 2))
+
         if (mx > self.border_offset and my > self.border_offset) and \
             (mx < self.width - self.border_offset and my < self.height - self.border_offset):
             col = (mx - self.border_offset) // self.cell_size
             row = (my - self.border_offset) // self.cell_size
-            print(f'Clicked on cell: ({col}, {row})')
 
             # Update selected square
             x = (col * self.cell_size) + self.border_offset
@@ -98,6 +110,14 @@ class ChessGUI:
             s.fill((255, 105, 180, 230))
             self.screen.blit(s, (x, y))
             self.grid[col][row][1] = (255, 105, 180, 230)
+
+            piece_name = piece_lookup[int(board_2d[row][col])]
+            if piece_name != '.':
+                w,h = self.pieces[piece_name].get_size()
+                self.screen.blit(self.pieces[piece_name], (x + (self.cell_size - w) // 2, y + (self.cell_size - h) // 2))
+            
+                self.selected_square = (col, row)
+                print('Selected square updated to:', self.selected_square)
 
     def main_loop(self):
         while True:
