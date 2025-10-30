@@ -15,6 +15,29 @@ class ChessGUI:
         self.piece_sheet = pygame.image.load('icons/chess_pieces.png').convert_alpha()
         self.board_colours = (0, 128, 128, 230), (0, 0, 0, 230)
 
+        # font
+        self.font_size = 28
+        font_offset = self.cell_size - (self.font_size//2)-5
+        self.font = pygame.font.Font(None, 28)
+        self.board_text = {
+            (0,0) : [self.font.render('1', True, self.board_colours[0]),0,0],
+            (0,1) : [self.font.render('2', True, self.board_colours[1]),0,0],
+            (0,2) : [self.font.render('3', True, self.board_colours[0]),0,0],
+            (0,3) : [self.font.render('4', True, self.board_colours[1]),0,0],
+            (0,4) : [self.font.render('5', True, self.board_colours[0]),0,0],
+            (0,5) : [self.font.render('6', True, self.board_colours[1]),0,0],
+            (0,6) : [self.font.render('7', True, self.board_colours[0]),0,0],
+            (0,7) : [self.font.render('8', True, self.board_colours[1]),0,0],
+            (0,7) : [self.font.render('h', True, self.board_colours[1]),font_offset,font_offset+5],
+            (1,7) : [self.font.render('g', True, self.board_colours[0]),font_offset,font_offset+5],
+            (2,7) : [self.font.render('f', True, self.board_colours[1]),font_offset,font_offset+5],
+            (3,7) : [self.font.render('e', True, self.board_colours[0]),font_offset,font_offset+5],
+            (4,7) : [self.font.render('d', True, self.board_colours[1]),font_offset,font_offset+5],
+            (5,7) : [self.font.render('c', True, self.board_colours[0]),font_offset,font_offset+5],
+            (6,7) : [self.font.render('b', True, self.board_colours[1]),font_offset,font_offset+5],
+            (7,7) : [self.font.render('a', True, self.board_colours[0]),font_offset,font_offset+5],
+        }
+
         self.ai = FisherAI().to(DEVICE)
         self.ai.load_weights()
 
@@ -60,6 +83,11 @@ class ChessGUI:
                 s.fill(color)
                 self.screen.blit(s, (x, y))
                 self.grid[i][j] = [s, color]
+
+                # Add board text
+                if (i,j) in self.board_text:
+                    txt,offset_y,offset_x = self.board_text[(i,j)]
+                    self.screen.blit(txt, (x + offset_x, y + offset_y))
 
                 # Add piece
                 piece_name = piece_lookup[int(board_2d[j][i])]
@@ -110,6 +138,11 @@ class ChessGUI:
                 if piece_name != '.':
                     w,h = self.pieces[piece_name].get_size()
                     self.screen.blit(self.pieces[piece_name], (x + (self.cell_size - w) // 2, y + (self.cell_size - h) // 2))
+                
+                # Add board text
+                if (i,j) in self.board_text:
+                    txt,offset_y,offset_x = self.board_text[(i,j)]
+                    self.screen.blit(txt, (x + offset_x, y + offset_y))
 
         if not moved and (mx > self.border_offset and my > self.border_offset) and \
             (mx < self.width - self.border_offset and my < self.height - self.border_offset):
