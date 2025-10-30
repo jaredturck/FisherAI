@@ -48,8 +48,6 @@ with open(path, "rb") as fh, dctx.stream_reader(fh) as reader:
 
         for num,move in enumerate(moves):
             board.push(move)
-
-            # Create array of the current board state
             for sq, piece in board.piece_map().items():
                 game_array[num, sq] = lookup[(piece.piece_type, int(piece.color))]
 
