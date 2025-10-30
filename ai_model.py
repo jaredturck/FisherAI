@@ -9,6 +9,7 @@ import torch, os, time, datetime, chess
 
 lookup = {(1,0) : 2,(2,0) : 3,(3,0) : 4,(4,0) : 5,(5,0) : 6,(6,0) : 7,(1,1) : 8,(2,1) : 9,(3,1) : 10,(4,1) : 11,(5,1) : 12,(6,1) : 13}
 piece_lookup = {0: ' ',1: '.',2: 'p',3: 'n',4: 'b',5: 'r',6: 'q',7: 'k',8: 'P',9: 'N',10: 'B',11: 'R',12: 'Q',13: 'K'}
+rlookup = {v : k for k,v in lookup.items()}
 
 DATASET_PATH = 'datasets/'
 WEIGHTS_PATH = 'weights/'
@@ -159,32 +160,35 @@ class FisherAI(Module):
             arr[sq] = lookup[(p.piece_type, int(p.color))]
         return arr
     
-    def predict(self, fen):
+    def predict(self, array):
         self.eval()
-        board = chess.Board(fen)
-
-        tensor = self.fen_to_tensor(fen).to(DEVICE)
+        x = array.to(DEVICE)
         with torch.no_grad():
-            logits = self.forward(tensor).squeeze(0)
-            logp = F.log_softmax(logits, dim=-1)
+            logp = F.log_softmax(self.forward(x).squeeze(0), dim=-1)
+        
+        arr = x.squeeze(0).cpu().tolist()
+        board = chess.Board.empty()
+        for sq, v in enumerate(array.view(-1)):
+            if v > 1:
+                ptype, color = rlookup[int(v)]
+                board.set_piece_at(sq, chess.Piece(ptype, bool(color)))
+            
+            best_score, best_board = float('-inf'), np.array(arr, dtype=np.int64)
+            for move in board.legal_moves:
+                b2 = board.copy(stack=False)
+                b2.push(move)
+                target = self.encode_board(b2)
 
-        best_move, best_score, best_board = None, float('-inf'), None
+                idx = torch.as_tensor(target, device=logp.device, dtype=torch.long).view(-1, 1)
+                score = logp.gather(1, idx).sum().item()
 
-        for move in board.legal_moves:
-            b2 = board.copy(stack=False)
-            b2.push(move)
-            target = self.encode_board(b2)
-
-            idx = torch.as_tensor(target, device=logp.device, dtype=torch.long).view(-1, 1)
-            score = logp.gather(1, idx).sum().item()
-
-            if score > best_score:
-                best_score = score
-                best_move = move
-                best_board = target
-
-        print(f'Predicted move: {best_move.uci()}')
+                if score > best_score:
+                    best_score = score
+                    best_board = target
+        
         self.display_board(best_board)
+        
+        return torch.as_tensor(best_board, dtype=torch.long)
     
     def display_board(self, array):
         array = array.reshape(8,8)
@@ -204,4 +208,4 @@ if __name__ == '__main__':
         model.load_weights()
         while True:
             fen = input('Enter FEN: ')
-            model.predict(fen)
+            # model.predict(fen)

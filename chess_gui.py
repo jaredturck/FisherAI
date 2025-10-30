@@ -1,4 +1,4 @@
-import pygame
+import pygame, torch
 from ai_model import FisherAI, DEVICE
 
 class ChessGUI:
@@ -18,6 +18,18 @@ class ChessGUI:
         self.ai = FisherAI().to(DEVICE)
         self.ai.load_weights()
 
+        self.board_array = torch.tensor([[
+            11.,  9.,  10., 12., 13., 10.,  9.,  11.,  
+            8.,   8.,  8.,  8.,  1.,  8.,   8.,  8.,  
+            1.,   1.,  1.,  1.,  1.,  1.,   1.,  1.,  
+            1.,   1.,  1.,  1.,  8.,  1.,   1.,  1.,  
+            1.,   1.,  1.,  1.,  1.,  1.,   1.,  1.,  
+            1.,   1.,  1.,  1.,  1.,  1.,   1.,  1., 
+            2.,   2.,  2.,  2.,  2.,  2.,   2.,  2.,
+            5.,   3.,  4.,  6.,  7.,  4.,   3.,  5.
+        ]], dtype=torch.long)
+
+        # Setup piece images
         piece_offsets = {
             'w_pawn':(3, 59, 47, 98), 'w_king':(72, 10, 53, 146), 'w_queen':(143, 22, 54, 134), 'w_bishop':(218, 33, 48, 124), 
             'w_rook':(284, 51, 59, 106), 'w_knight':(356, 48, 58, 109), 'b_pawn':(3, 205, 47, 97), 'b_king':(72, 156, 53, 146), 
@@ -31,8 +43,11 @@ class ChessGUI:
             scale = min((self.cell_size - 10) / w, (self.cell_size - 10) / h)
             self.pieces[name] = pygame.transform.smoothscale(frame, (int(w * scale), int(h * scale)))
 
+        # Draw board
         self.add_background_img()
         self.draw_board()
+
+        self.ai.predict(self.board_array)
     
     def draw_board(self):
         ''' Change all cells to default colors '''
