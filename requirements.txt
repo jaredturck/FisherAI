@@ -2,3 +2,4 @@ torch
 zstandard
 chess
 numpy
+pygame
