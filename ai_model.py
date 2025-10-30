@@ -12,8 +12,8 @@ piece_lookup = {0: ' ',1: '.',2: 'p',3: 'n',4: 'b',5: 'r',6: 'q',7: 'k',8: 'P',9
 
 DATASET_PATH = 'datasets/'
 WEIGHTS_PATH = 'weights/'
-BATCH_SIZE = 2
-DEVICE = 'cuda'
+BATCH_SIZE = 1
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 class ChessDataset(Dataset):
     def __init__(self):
@@ -51,7 +51,7 @@ class FisherAI(Module):
         self.nheads = self.d_model // 64
         self.dim_feedforward = self.d_model * 4
         self.no_transformer_layers = self.d_model // 128
-        self.dropout = 0.1
+        self.dropout = 0.05
         self.dataset = ChessDataset()
         self.optimizer = None
         
@@ -96,7 +96,7 @@ class FisherAI(Module):
         start = time.time()
         save_time = time.time()
 
-        print(f'[+] Training started, d_model={self.d_model}, nheads={self.nheads}, dim_feedforward={self.dim_feedforward}, '
+        print(f'[+] Training ({DEVICE}) started, d_model={self.d_model}, nheads={self.nheads}, dim_feedforward={self.dim_feedforward}, '
               f'layers={self.no_transformer_layers}, batch_size={BATCH_SIZE}')
         for epoch in range(100):
             total_loss = 0.0
