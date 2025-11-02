@@ -20,22 +20,22 @@ class ChessGUI:
         font_offset = self.cell_size - (self.font_size//2)-5
         self.font = pygame.font.Font(None, 28)
         self.board_text = {
-            (0,0) : [self.font.render('1', True, self.board_colours[0]),0,0],
-            (0,1) : [self.font.render('2', True, self.board_colours[1]),0,0],
-            (0,2) : [self.font.render('3', True, self.board_colours[0]),0,0],
-            (0,3) : [self.font.render('4', True, self.board_colours[1]),0,0],
-            (0,4) : [self.font.render('5', True, self.board_colours[0]),0,0],
-            (0,5) : [self.font.render('6', True, self.board_colours[1]),0,0],
-            (0,6) : [self.font.render('7', True, self.board_colours[0]),0,0],
-            (0,7) : [self.font.render('8', True, self.board_colours[1]),0,0],
-            (0,7) : [self.font.render('h', True, self.board_colours[1]),font_offset,font_offset+5],
-            (1,7) : [self.font.render('g', True, self.board_colours[0]),font_offset,font_offset+5],
-            (2,7) : [self.font.render('f', True, self.board_colours[1]),font_offset,font_offset+5],
-            (3,7) : [self.font.render('e', True, self.board_colours[0]),font_offset,font_offset+5],
-            (4,7) : [self.font.render('d', True, self.board_colours[1]),font_offset,font_offset+5],
-            (5,7) : [self.font.render('c', True, self.board_colours[0]),font_offset,font_offset+5],
-            (6,7) : [self.font.render('b', True, self.board_colours[1]),font_offset,font_offset+5],
-            (7,7) : [self.font.render('a', True, self.board_colours[0]),font_offset,font_offset+5],
+            (0,0) : [self.font.render('8', True, self.board_colours[1]),0,0],
+            (0,1) : [self.font.render('7', True, self.board_colours[0]),0,0],
+            (0,2) : [self.font.render('6', True, self.board_colours[1]),0,0],
+            (0,3) : [self.font.render('5', True, self.board_colours[0]),0,0],
+            (0,4) : [self.font.render('4', True, self.board_colours[1]),0,0],
+            (0,5) : [self.font.render('3', True, self.board_colours[0]),0,0],
+            (0,6) : [self.font.render('2', True, self.board_colours[1]),0,0],
+            (0,7) : [self.font.render('1', True, self.board_colours[0]),0,0],
+            (0,7) : [self.font.render('a', True, self.board_colours[0]),font_offset,font_offset+5],
+            (1,7) : [self.font.render('b', True, self.board_colours[1]),font_offset,font_offset+5],
+            (2,7) : [self.font.render('c', True, self.board_colours[0]),font_offset,font_offset+5],
+            (3,7) : [self.font.render('d', True, self.board_colours[1]),font_offset,font_offset+5],
+            (4,7) : [self.font.render('e', True, self.board_colours[0]),font_offset,font_offset+5],
+            (5,7) : [self.font.render('f', True, self.board_colours[1]),font_offset,font_offset+5],
+            (6,7) : [self.font.render('g', True, self.board_colours[0]),font_offset,font_offset+5],
+            (7,7) : [self.font.render('h', True, self.board_colours[1]),font_offset,font_offset+5],
         }
 
         self.ai = FisherAI().to(DEVICE)
@@ -79,7 +79,7 @@ class ChessGUI:
                 x = (i * self.cell_size) + self.border_offset
                 y = (j * self.cell_size) + self.border_offset
                 s = pygame.Surface((self.cell_size, self.cell_size), pygame.SRCALPHA)
-                color = self.board_colours[(i + j) % 2 == 0]
+                color = self.board_colours[(i + j) % 2 == 1]
                 s.fill(color)
                 self.screen.blit(s, (x, y))
                 self.grid[i][j] = [s, color]
@@ -126,7 +126,7 @@ class ChessGUI:
         for i in range(8):
             for j in range(8):
                 s = self.grid[i][j][0]
-                color = self.board_colours[(i + j) % 2 == 0]
+                color = self.board_colours[(i + j) % 2 == 1]
                 s.fill(color)
                 self.screen.blit(s, ((i * self.cell_size) + self.border_offset, (j * self.cell_size) + self.border_offset))
                 self.grid[i][j][1] = color
