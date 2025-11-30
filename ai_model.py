@@ -40,26 +40,29 @@ class ChessDataset(Dataset):
             path = os.path.join(DATASET_PATH, fname)
             data = torch.load(path, map_location="cpu", weights_only=False)
 
-            for boards_tensor, turns_tensor, result_white in data:
+            for boards_tensor, turns_tensor, moves_idx_tensor, result_white in data:
                 boards_tensor = boards_tensor.long()
                 turns_tensor = turns_tensor.long()
+                moves_idx_tensor = moves_idx_tensor.long()
                 num_positions = boards_tensor.shape[0]
 
                 for ply_idx in range(num_positions):
                     board64 = boards_tensor[ply_idx]
                     whites_turn = bool(turns_tensor[ply_idx].item())
                     value = float(result_white if whites_turn else -result_white)
+                    move_idx = int(moves_idx_tensor[ply_idx].item())
 
-                    self.training_data.append((board64, value))
+                    self.training_data.append((board64, value, move_idx))
                     pos_count += 1
 
         print(f"[+] Loaded {pos_count:,} positions")
     
     def collate_fn(self, batch):
-        boards, values = zip(*batch)
+        boards, values, move_idx = zip(*batch)
         x = torch.stack(boards, dim=0)
         y = torch.tensor(values, dtype=torch.float32)
-        return x, y
+        m = torch.tensor(move_idx, dtype=torch.long)
+        return x, y, m
 
 class FisherAI(Module):
     def __init__(self, emb_dim=16, hidden_dim=512):
@@ -67,10 +70,12 @@ class FisherAI(Module):
         self.dataset = ChessDataset()
         self.embedding = nn.Embedding(14, emb_dim, padding_idx=0)
 
-        self.fc1 = nn.Linear(64 * emb_dim + 6, hidden_dim)
+        self.fc1 = nn.Linear(64 * emb_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, 1)
         self.relu = nn.ReLU()
+
+        self.value_head = nn.Linear(hidden_dim, 1)
+        self.policy_head = nn.Linear(hidden_dim, 64 * 64)
 
         self.stock_fish_path = '/usr/bin/stockfish'
         self.board_buffer = np.empty(64, dtype=np.int64)
@@ -82,15 +87,18 @@ class FisherAI(Module):
         x = x.view(x.size(0), -1)
         x = self.relu(self.fc1(x))
         x = self.relu(self.fc2(x))
-        x = self.fc3(x)
 
-        return x.squeeze(-1)
+        value = self.value_head(x).squeeze(-1)
+        policy = self.policy_head(x)
+
+        return value, policy
     
     def train_model(self):
         self.dataset.read_data()
         self.dataloader = torch.utils.data.DataLoader(self.dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=self.dataset.collate_fn)
         self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
-        loss_func = nn.MSELoss()
+        value_loss_func = nn.MSELoss()
+        policy_loss_func = nn.CrossEntropyLoss()
 
         self.load_weights()
         start = time.time()
@@ -100,13 +108,17 @@ class FisherAI(Module):
         print(f'[+] Starting training on {torch.cuda.get_device_name(DEVICE)} for {len(self.dataset):,} positions')
         for epoch in range(1000):
             total_loss = 0.0
-            for batch_idx, (boards, values) in enumerate(self.dataloader):
+            for batch_idx, (boards, values, move_idx) in enumerate(self.dataloader):
                 boards = boards.to(DEVICE)
                 values = values.to(DEVICE)
+                move_idx = move_idx.to(DEVICE)
 
                 self.optimizer.zero_grad()
-                preds = self.forward(boards)
-                loss = loss_func(preds, values)
+                pred_value, policy_logits = self.forward(boards)
+
+                loss_value = value_loss_func(pred_value, values)
+                loss_policy = policy_loss_func(policy_logits, move_idx)
+                loss = loss_value + loss_policy
 
                 loss.backward()
                 self.optimizer.step()
@@ -193,32 +205,37 @@ class FisherAI(Module):
             print('|'.join(piece_lookup[int(array[i, j])] for j in range(8)))
     
     @torch.no_grad()
+    def suggest_moves(self, board, k=5):
+        self.eval()
+        self.encode_board_inplace(board, self.board_buffer)
+        board_tensor = torch.from_numpy(self.board_buffer).long().unsqueeze(0).to(DEVICE)
+
+        value, policy_logits = self.forward(board_tensor)
+        policy_logits = policy_logits.squeeze(0)
+        policy_probs = F.softmax(policy_logits, dim=-1)
+
+        scored_moves = []
+        for move in board.legal_moves:
+            idx = move.from_square * 64 + move.to_square
+            score = policy_probs[idx].item()
+            scored_moves.append((score, move))
+        
+        scored_moves.sort(reverse=True, key=lambda x: x[0])
+        top = [move for score, move in scored_moves[:k]]
+        return top, float(value.item())
+    
+    @torch.no_grad()
     def best_move_from_fen(self, fen):
         ''' Get the best move from a FEN string '''
         board = chess.Board(fen)
         return self.best_move_from_board(board)
     
     @torch.no_grad()
-    def best_move_from_board(self, board):
+    def best_move_from_board(self, board, k=5):
         ''' Get the best move from a chess.Board object '''
-        legal_moves = list(board.legal_moves)
-        if not legal_moves:
-            return None
-        
-        best_move = None
-        best_score = float('-inf')
+        moves, _ = self.suggest_moves(board, k)
+        return moves[0] if moves else None
 
-        for move in legal_moves:
-            board.push(move)
-            score = self.evaluate_position(board)
-            board.pop()
-
-            if score > best_score:
-                best_score = score
-                best_move = move
-        
-        return best_move
-    
     @torch.no_grad()
     def evaluate_position(self, board):
         if board.is_game_over():
@@ -234,17 +251,25 @@ class FisherAI(Module):
         board_tensor = torch.from_numpy(self.board_buffer).long().unsqueeze(0).to(DEVICE)
 
         self.eval()
-        value = self.forward(board_tensor)
+        value, _ = self.forward(board_tensor)
         return float(value.item())
     
-    def negamax_search(self, board, depth, alpha, beta, start_time, time_limit):
+    def negamax_search(self, board, depth, alpha, beta, start_time, time_limit, k=5):
         if depth == 0 or board.is_game_over() or (time.time() - start_time) > time_limit:
             return self.evaluate_position(board)
+        
+        moves, _ = self.suggest_moves(board, k=k)
+
+        if not moves:
+            moves = list(board.legal_moves)
 
         best = float('-inf')
-        for move in board.legal_moves:
+        for move in moves:
+            if time.time() - start_time > time_limit:
+                break
+
             board.push(move)
-            score = -self.negamax_search(board, depth - 1, -beta, -alpha, start_time, time_limit)
+            score = -self.negamax_search(board, depth - 1, -beta, -alpha, start_time, time_limit, k)
             board.pop()
 
             if score > best:
@@ -253,13 +278,10 @@ class FisherAI(Module):
                 alpha = best
             if alpha >= beta:
                 break
-
-            if time.time() - start_time > time_limit:
-                break
         
         return best
     
-    def best_move_negamax(self, board, depth = 2, time_limit=5):
+    def best_move_negamax(self, board, depth = 2, time_limit=5, k=5):
         start_time = time.time()
         best_move = None
         best_score = float('-inf')
@@ -267,16 +289,18 @@ class FisherAI(Module):
         alpha = -math.inf
         beta = math.inf
 
-        legal_moves = list(board.legal_moves)
-        if not legal_moves:
+        moves, _ = self.suggest_moves(board, k=5)
+        if not moves:
+            moves = list(board.legal_moves)
+        if not moves:
             return None
 
-        for move in board.legal_moves:
+        for move in moves:
             if time.time() - start_time > time_limit:
                 break
 
             board.push(move)
-            score = -self.negamax_search(board, depth - 1, -beta, -alpha, start_time, time_limit)
+            score = -self.negamax_search(board, depth - 1, -beta, -alpha, start_time, time_limit, k)
             board.pop()
 
             if score > best_score:
@@ -286,8 +310,8 @@ class FisherAI(Module):
             if score > alpha:
                 alpha = score
         
-        if best_move is None:
-            best_move = self.best_move_from_board(board)
+        if best_move is None and moves:
+            best_move = moves[0]
         
         return best_move
     
