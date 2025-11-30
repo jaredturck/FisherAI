@@ -76,8 +76,11 @@ class FisherAI(Module):
     def __init__(self, emb_dim=16, hidden_dim=512):
         super().__init__()
         self.dataset = ChessDataset()
-        self.embedding = nn.Embedding(14, emb_dim, padding_idx=0)
+        self.dataloader_workers = max(2, os.cpu_count() // 2)
+        self.optimizer = None
+        self.max_epochs = 1000
 
+        self.embedding = nn.Embedding(14, emb_dim, padding_idx=0)
         self.fc1 = nn.Linear(64 * emb_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
         self.relu = nn.ReLU()
@@ -103,8 +106,9 @@ class FisherAI(Module):
     
     def train_model(self):
         self.dataset.read_data()
-        self.dataloader = torch.utils.data.DataLoader(self.dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=self.dataset.collate_fn)
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
+        self.dataloader = torch.utils.data.DataLoader(self.dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=self.dataset.collate_fn,
+            num_workers=self.dataloader_workers, pin_memory=True, persistent_workers=True, prefetch_factor=4)
+        self.optimizer = torch.optim.AdamW(self.parameters(), lr=1e-4, weight_decay=1e-4, fused=True)
         value_loss_func = nn.MSELoss()
         policy_loss_func = nn.CrossEntropyLoss()
 
@@ -115,7 +119,10 @@ class FisherAI(Module):
 
         print(f'[+] Starting training on {DEVICE} for {len(self.dataset):,} positions, batch size {BATCH_SIZE}')
         for epoch in range(1000):
+            total_value_loss = 0.0
+            total_policy_loss = 0.0
             total_loss = 0.0
+
             for batch_idx, (boards, values, move_idx) in enumerate(self.dataloader):
                 boards = boards.to(DEVICE)
                 values = values.to(DEVICE)
@@ -130,7 +137,10 @@ class FisherAI(Module):
 
                 loss.backward()
                 self.optimizer.step()
+
                 total_loss += loss.item()
+                total_value_loss += loss_value.item()
+                total_policy_loss += loss_policy.item()
 
                 if time.time() - start > 10:
                     start = time.time()
@@ -140,17 +150,25 @@ class FisherAI(Module):
                         self.save_weights()
             
             avg_loss = total_loss / len(self.dataloader)
-            print(f'[+] Epoch {epoch+1}, avg loss {avg_loss:.2f}')
+            avg_value_loss = total_value_loss / len(self.dataloader)
+            avg_policy_loss = total_policy_loss / len(self.dataloader)
+            print(f'[+] Epoch {epoch+1}, avg loss {avg_loss:.2f}, value loss {avg_value_loss:.2f}, policy loss {avg_policy_loss:.2f}')
 
             if avg_loss < TARGET_LOSS:
                 print(f'[+] Target loss reached, stopping training, loss {avg_loss:.2f}')
                 return
 
     def save_weights(self):
+        files = [os.path.join(WEIGHTS_PATH, file) for file in os.listdir(WEIGHTS_PATH) if file.endswith('.pt')]
+        if len(files) > 10:
+            oldest = min(files, key=os.path.getctime)
+            os.remove(oldest)
+            print(f'[+] Deleted oldest weight file {oldest}')
+
         fname = f'weights_{datetime.datetime.now().strftime("%d-%b-%Y_%H-%M")}.pt'
         torch.save({
             'weights': self.state_dict(),
-            'optimizer': self.optimizer.state_dict()
+            'optimizer': self.optimizer.state_dict() if self.optimizer else None
         }, os.path.join(WEIGHTS_PATH, fname))
         print(f'[+] Saved weights {fname}')
     
