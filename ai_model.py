@@ -19,6 +19,7 @@ DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 class ChessDataset(Dataset):
     def __init__(self):
         self.training_data = []
+        self.max_files = 4
 
     def __len__(self):
         return len(self.training_data)
@@ -28,36 +29,46 @@ class ChessDataset(Dataset):
     
     def read_data(self):
         self.training_data = []
-        for file in os.listdir(DATASET_PATH):
-            if file.endswith('.pt'):
-                data = torch.load(os.path.join(DATASET_PATH, file), map_location='cpu', weights_only=False)
-                for game in data:
-                    boards = torch.as_tensor(game['boards'], dtype=torch.long)
-                    result_white = float(game['result'])
+        files = [f for f in os.listdir(DATASET_PATH) if f.endswith('.pt')]
+        files.sort()
 
-                    for i in range(boards.shape[0]):
-                        board64 = boards[i]
-                        whites_turn = i % 2 == 0
-                        value = result_white if whites_turn else -result_white
-                        self.training_data.append((board64, value))
-        
-        print(f'[+] Loaded {len(self.training_data):,} positions')
+        pos_count = 0
+        for file_idx, fname in enumerate(files):
+            if file_idx >= self.max_files:
+                break
+
+            path = os.path.join(DATASET_PATH, fname)
+            data = torch.load(path, map_location="cpu", weights_only=False)
+
+            for boards_tensor, result_white in data:
+                boards_tensor = boards_tensor.long()
+                num_positions = boards_tensor.shape[0]
+
+                for ply_idx in range(num_positions):
+                    board64 = boards_tensor[ply_idx]
+                    whites_turn = (ply_idx % 2 == 0)
+                    value = float(result_white if whites_turn else -result_white)
+
+                    self.training_data.append((board64, value))
+                    pos_count += 1
+
+        print(f"[+] Loaded {pos_count:,} positions")
     
     def collate_fn(self, batch):
-        x,y = zip(*batch)
-        x = pad_sequence(x, batch_first=True, padding_value=0)
-        y = pad_sequence(y, batch_first=True, padding_value=0)
-        return x,y
+        boards, values = zip(*batch)
+        x = torch.stack(boards, dim=0)
+        y = torch.tensor(values, dtype=torch.float32)
+        return x, y
 
 class FisherAI(Module):
-    def __init__(self, emb_dim=16, hidden_dim=256):
+    def __init__(self, emb_dim=16, hidden_dim=512):
         super().__init__()
         self.embedding = nn.Embedding(14, emb_dim, padding_idx=0)
         in_dim = 64 * emb_dim + 6
 
         self.fc1 = nn.Linear(in_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim // 2)
-        self.fc3 = nn.Linear(hidden_dim // 2, 1)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, 1)
         self.relu = nn.ReLU()
 
         self.stock_fish_path = '/usr/bin/stockfish'
