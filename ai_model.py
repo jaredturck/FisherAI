@@ -40,13 +40,14 @@ class ChessDataset(Dataset):
             path = os.path.join(DATASET_PATH, fname)
             data = torch.load(path, map_location="cpu", weights_only=False)
 
-            for boards_tensor, result_white in data:
+            for boards_tensor, turns_tensor, result_white in data:
                 boards_tensor = boards_tensor.long()
+                turns_tensor = turns_tensor.long()
                 num_positions = boards_tensor.shape[0]
 
                 for ply_idx in range(num_positions):
                     board64 = boards_tensor[ply_idx]
-                    whites_turn = (ply_idx % 2 == 0)
+                    whites_turn = bool(turns_tensor[ply_idx].item())
                     value = float(result_white if whites_turn else -result_white)
 
                     self.training_data.append((board64, value))
@@ -73,15 +74,12 @@ class FisherAI(Module):
 
         self.stock_fish_path = '/usr/bin/stockfish'
         self.board_buffer = np.empty(64, dtype=np.int64)
-        self.feature_buffer = np.empty(6, dtype=np.float32)
         self.fen_buffer = np.empty(64, dtype=np.int64)
         self.encode_buffer = np.empty(64, dtype=np.int64)
 
-    def forward(self, board, feature_tensor):
+    def forward(self, board):
         x = self.embedding(board)
         x = x.view(x.size(0), -1)
-        x = torch.cat((x, feature_tensor), dim=1)
-
         x = self.relu(self.fc1(x))
         x = self.relu(self.fc2(x))
         x = self.fc3(x)
@@ -106,10 +104,8 @@ class FisherAI(Module):
                 boards = boards.to(DEVICE)
                 values = values.to(DEVICE)
 
-                feature_tensors = torch.empty(boards.size(0), 6, device=DEVICE)
-
                 self.optimizer.zero_grad()
-                preds = self.forward(boards, feature_tensors)
+                preds = self.forward(boards)
                 loss = loss_func(preds, values)
 
                 loss.backward()
@@ -160,17 +156,7 @@ class FisherAI(Module):
     def encode_board(self, board):
         self.encode_board_inplace(board, self.encode_buffer)
         return self.encode_buffer.copy()
-    
-    def encode_features(self, board):
-        fb = self.feature_buffer
-        fb[0] = 1.0 if board.turn == chess.WHITE else 0.0
-        fb[1] = 1.0 if board.has_kingside_castling_rights(chess.WHITE) else 0.0
-        fb[2] = 1.0 if board.has_queenside_castling_rights(chess.WHITE) else 0.0
-        fb[3] = 1.0 if board.has_kingside_castling_rights(chess.BLACK) else 0.0
-        fb[4] = 1.0 if board.has_queenside_castling_rights(chess.BLACK) else 0.0
-        fb[5] = 1.0 if board.ep_square is not None else 0.0
-        return fb
-    
+
     def predict(self, array):
         self.eval()
         x = array.to(DEVICE)
@@ -246,11 +232,9 @@ class FisherAI(Module):
         
         self.encode_board_inplace(board, self.board_buffer)
         board_tensor = torch.from_numpy(self.board_buffer).long().unsqueeze(0).to(DEVICE)
-        feature_np = self.encode_features(board)
-        feature_tensor = torch.from_numpy(feature_np).float().unsqueeze(0).to(DEVICE)
 
         self.eval()
-        value = self.forward(board_tensor, feature_tensor)
+        value = self.forward(board_tensor)
         return float(value.item())
     
     def negamax_search(self, board, depth, alpha, beta, start_time, time_limit):

@@ -161,7 +161,6 @@ class ChessGUI:
                 self.screen.blit(self.pieces[piece_name], (x + (self.cell_size - w) // 2, y + (self.cell_size - h) // 2))
                 self.selected_square = (col, row)
 
-
     def main_loop(self):
         while True:
             for event in pygame.event.get():
