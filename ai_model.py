@@ -56,6 +56,8 @@ class FisherAI(Module):
         self.dataset = ChessDataset()
         self.optimizer = None
         self.stock_fish_path = '/usr/bin/stockfish'
+        self.encode_buffer = np.empty(64, dtype=np.int64)
+        self.fen_buffer = np.empty(64, dtype=np.int64)
         
         self.piece_embedding = nn.Embedding(14, self.d_model, padding_idx=0)
         self.position_embedding = nn.Embedding(64, self.d_model)
@@ -148,18 +150,18 @@ class FisherAI(Module):
 
     def fen_to_tensor(self, fen):
         board = chess.Board(fen)
-        
-        arr = np.ones(64, dtype=np.int64)
-        for sq, sequence in board.piece_map().items():
-            arr[sq] = lookup[(sequence.piece_type, int(sequence.color))]
-        arr = arr[None, :]
-        return torch.as_tensor(arr.copy())
+        self.encode_board_inplace(board, self.fen_buffer)
+        array = self.fen_buffer[None, :].copy()
+        return torch.as_tensor(array, dtype=torch.long)
     
-    def encode_board(self, b):
-        arr = np.ones(64, dtype=np.int64)
-        for sq, p in b.piece_map().items():
-            arr[sq] = lookup[(p.piece_type, int(p.color))]
-        return arr
+    def encode_board_inplace(self, board, dest):
+        dest.fill(1)
+        for sq, p in board.piece_map().items():
+            dest[sq] = lookup[(p.piece_type, int(p.color))]
+    
+    def encode_board(self, board):
+        self.encode_board_inplace(board, self.encode_buffer)
+        return self.encode_buffer.copy()
     
     def predict(self, array):
         self.eval()
@@ -200,21 +202,20 @@ class FisherAI(Module):
     def best_move_from_fen(self, fen):
         ''' Get the best move from a FEN string '''
         board = chess.Board(fen)
-        array = self.fen_to_tensor(fen)
-        x = array.to(DEVICE)
-
+        x = self.fen_to_tensor(fen).to(DEVICE)
         self.eval()
         logp = F.log_softmax(self.forward(x).squeeze(0), dim=-1)
+        logp_np = logp.detach().cpu().numpy()
+
         best_score = float('-inf')
         best_move = None
 
-        for move in board.legal_moves:
-            b2 = board.copy(stack=False)
-            b2.push(move)
-            target = self.encode_board(b2)
-
-            idx = torch.as_tensor(target, device=logp.device, dtype=torch.long).view(-1, 1)
-            score = logp.gather(1, idx).sum().item()
+        lagal_moves = list(board.legal_moves)
+        for move in lagal_moves:
+            board.push(move)
+            self.encode_board_inplace(board, self.encode_buffer)
+            score = logp_np[np.arange(64), self.encode_buffer].sum()
+            board.pop()
 
             if score > best_score:
                 best_score = score
@@ -230,29 +231,26 @@ class FisherAI(Module):
         engine = chess.engine.SimpleEngine.popen_uci(self.stock_fish_path)
         engine.configure({'UCI_Elo' : stock_fish_elo, 'UCI_LimitStrength' : True})
 
-        model = FisherAI().to(DEVICE)
-        model.load_weights()
-
         scores = {'stockfish' : 0, 'fisherai' : 0, 'draws' : 0}
         result_map = {'1-0' : 'stockfish', '0-1' : 'fisherai', '1/2-1/2' : 'draws'}
         no_games = 50
 
         print('[+] Starting evaulation')
         for game in range(no_games):
-
             board = chess.Board()
             while not board.is_game_over():
 
                 # Stockfish move
                 result = engine.play(board, chess.engine.Limit(time=0.05))
-                move = result.move
-                board.push(move)
+                board.push(result.move)
 
+                if board.is_game_over():
+                    break
+                
                 # FisherAI move
-                if not board.is_game_over():
-                    fen = board.fen()
-                    move = model.best_move_from_fen(fen)
-                    board.push(move)
+                fen = board.fen()
+                move = self.best_move_from_fen(fen)
+                board.push(move)
             
             # Add scores
             scores[result_map[board.result()]] += 1
@@ -269,6 +267,7 @@ class FisherAI(Module):
             elo = stock_fish_elo + 400 * math.log10(score / (1 - score))
         
         print(f'[+] Evaluation completed, FisherAI ELO {elo:.2f}')
+        engine.quit()
 
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == 'train':
