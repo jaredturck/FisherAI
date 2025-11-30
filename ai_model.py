@@ -5,21 +5,28 @@ from torch.nn.utils.rnn import pad_sequence
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-import torch, os, time, datetime, math, chess, chess.engine
+import torch, os, time, datetime, math, chess, chess.engine, platform
 
 lookup = {(1,0) : 2,(2,0) : 3,(3,0) : 4,(4,0) : 5,(5,0) : 6,(6,0) : 7,(1,1) : 8,(2,1) : 9,(3,1) : 10,(4,1) : 11,(5,1) : 12,(6,1) : 13}
 piece_lookup = {0: ' ',1: '.',2: 'p',3: 'n',4: 'b',5: 'r',6: 'q',7: 'k',8: 'P',9: 'N',10: 'B',11: 'R',12: 'Q',13: 'K'}
 rlookup = {v : k for k,v in lookup.items()}
 
-DATASET_PATH = 'datasets/'
-WEIGHTS_PATH = 'weights/'
-BATCH_SIZE = 1
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+TARGET_LOSS = 2
+
+if platform.uname().node == 'Jared-PC':
+    DATASET_PATH = 'datasets/'
+    WEIGHTS_PATH = 'weights/'
+    BATCH_SIZE = 4096
+else:
+    DATASET_PATH = 'datasets/'
+    WEIGHTS_PATH = 'weights/'
+    BATCH_SIZE = 4096
 
 class ChessDataset(Dataset):
     def __init__(self):
         self.training_data = []
-        self.max_files = 4
+        self.max_files = 16
 
     def __len__(self):
         return len(self.training_data)
@@ -32,6 +39,7 @@ class ChessDataset(Dataset):
         files = [f for f in os.listdir(DATASET_PATH) if f.endswith('.pt')]
         files.sort()
 
+        print('[+] Reading dataset')
         pos_count = 0
         for file_idx, fname in enumerate(files):
             if file_idx >= self.max_files:
@@ -105,7 +113,7 @@ class FisherAI(Module):
         save_time = time.time()
         self.train()
 
-        print(f'[+] Starting training on {DEVICE} for {len(self.dataset):,} positions')
+        print(f'[+] Starting training on {DEVICE} for {len(self.dataset):,} positions, batch size {BATCH_SIZE}')
         for epoch in range(1000):
             total_loss = 0.0
             for batch_idx, (boards, values, move_idx) in enumerate(self.dataloader):
@@ -126,13 +134,17 @@ class FisherAI(Module):
 
                 if time.time() - start > 10:
                     start = time.time()
-                    print(f'Epoch {epoch+1}, Batch {batch_idx+1}, Loss: {loss.item():.6f}')
+                    print(f'Epoch {epoch+1}, Batch {batch_idx+1} of {len(self.dataloader)}, Loss: {loss.item():.6f}')
                     if time.time() - save_time > 300:
                         save_time = time.time()
                         self.save_weights()
             
             avg_loss = total_loss / len(self.dataloader)
             print(f'[+] Epoch {epoch+1}, avg loss {avg_loss:.2f}')
+
+            if avg_loss < TARGET_LOSS:
+                print(f'[+] Target loss reached, stopping training, loss {avg_loss:.2f}')
+                return
 
     def save_weights(self):
         fname = f'weights_{datetime.datetime.now().strftime("%d-%b-%Y_%H-%M")}.pt'
