@@ -63,10 +63,10 @@ class ChessDataset(Dataset):
 class FisherAI(Module):
     def __init__(self, emb_dim=16, hidden_dim=512):
         super().__init__()
+        self.dataset = ChessDataset()
         self.embedding = nn.Embedding(14, emb_dim, padding_idx=0)
-        in_dim = 64 * emb_dim + 6
 
-        self.fc1 = nn.Linear(in_dim, hidden_dim)
+        self.fc1 = nn.Linear(64 * emb_dim + 6, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
         self.fc3 = nn.Linear(hidden_dim, 1)
         self.relu = nn.ReLU()
@@ -74,6 +74,8 @@ class FisherAI(Module):
         self.stock_fish_path = '/usr/bin/stockfish'
         self.board_buffer = np.empty(64, dtype=np.int64)
         self.feature_buffer = np.empty(6, dtype=np.float32)
+        self.fen_buffer = np.empty(64, dtype=np.int64)
+        self.encode_buffer = np.empty(64, dtype=np.int64)
 
     def forward(self, board, feature_tensor):
         x = self.embedding(board)
@@ -89,25 +91,26 @@ class FisherAI(Module):
     def train_model(self):
         self.dataset.read_data()
         self.dataloader = torch.utils.data.DataLoader(self.dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=self.dataset.collate_fn)
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
+        loss_func = nn.MSELoss()
 
-        self.optimizer = torch.optim.AdamW(self.parameters(), lr=1e-4)
-        loss_func = nn.CrossEntropyLoss(ignore_index=0)
         self.load_weights()
         start = time.time()
         save_time = time.time()
+        self.train()
 
-        print(f'[+] Training ({DEVICE}) started, d_model={self.d_model}, nheads={self.nheads}, dim_feedforward={self.dim_feedforward}, '
-              f'layers={self.no_transformer_layers}, batch_size={BATCH_SIZE}')
-        for epoch in range(100):
+        print(f'[+] Starting training on {torch.cuda.get_device_name(DEVICE)} for {len(self.dataset):,} positions')
+        for epoch in range(1000):
             total_loss = 0.0
-            for n, (src, tgt) in enumerate(self.dataloader):
-                B,T,S = src.shape
-                src = src.to(DEVICE).view(-1, S)
-                tgt = tgt.to(DEVICE).view(-1)
-                self.optimizer.zero_grad()
+            for batch_idx, (boards, values) in enumerate(self.dataloader):
+                boards = boards.to(DEVICE)
+                values = values.to(DEVICE)
 
-                output = self.forward(src)
-                loss = loss_func(output.view(-1, 14), tgt)
+                feature_tensors = torch.empty(boards.size(0), 6, device=DEVICE)
+
+                self.optimizer.zero_grad()
+                preds = self.forward(boards, feature_tensors)
+                loss = loss_func(preds, values)
 
                 loss.backward()
                 self.optimizer.step()
@@ -115,21 +118,21 @@ class FisherAI(Module):
 
                 if time.time() - start > 10:
                     start = time.time()
-                    print(f'[+] Epoch {epoch+1}, batch {n+1} of {len(self.dataloader)}, loss: {loss.item():.4f}')
-
-                    if time.time() - save_time > 600:
+                    print(f'Epoch {epoch+1}, Batch {batch_idx+1}, Loss: {loss.item():.6f}')
+                    if time.time() - save_time > 300:
                         save_time = time.time()
                         self.save_weights()
-                        print('[+] Weights saved')
-    
-            print(f'Epoch {epoch+1}, avg loss: {total_loss / len(self.dataloader):.4f}')
-        
+            
+            avg_loss = total_loss / len(self.dataloader)
+            print(f'[+] Epoch {epoch+1}, avg loss {avg_loss:.2f}')
+
     def save_weights(self):
-        fname = f'weights_{datetime.datetime.now().strftime('%d-%b-%Y_%H-%M')}.pt'
+        fname = f'weights_{datetime.datetime.now().strftime("%d-%b-%Y_%H-%M")}.pt'
         torch.save({
             'weights': self.state_dict(),
             'optimizer': self.optimizer.state_dict()
         }, os.path.join(WEIGHTS_PATH, fname))
+        print(f'[+] Saved weights {fname}')
     
     def load_weights(self):
         files = [os.path.join(WEIGHTS_PATH, file) for file in os.listdir(WEIGHTS_PATH) if file.endswith('.pt')]
