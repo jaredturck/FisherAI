@@ -31,17 +31,20 @@ def process_chunk_worker(chunk_text, lookup, worker_id, shard_size, shard_prefix
         moves = list(game.mainline_moves())
         if not moves:
             continue
-
-        game_array = np.ones((len(moves), 64), dtype=np.int64)
-        turns_array = np.empty(len(moves), dtype=np.int8)
+        
+        n = len(moves)
+        game_array = np.ones((n, 64), dtype=np.int64)
+        turns_array = np.empty(n, dtype=np.int8)
+        moves_idx_array = np.empty(n, dtype=np.int64)
 
         for num, move in enumerate(moves):
             board.push(move)
             turns_array[num] = 1 if board.turn == chess.WHITE else 0
+            moves_idx_array[num] = move.from_square * 64 + move.to_square
             for sq, piece in board.piece_map().items():
                 game_array[num, sq] = lookup[(piece.piece_type, int(piece.color))]
 
-        training_data.append((torch.from_numpy(game_array), torch.from_numpy(turns_array), result))
+        training_data.append((torch.from_numpy(game_array), torch.from_numpy(turns_array), torch.from_numpy(moves_idx_array), result))
         processed_games += 1
 
         if len(training_data) >= shard_size:

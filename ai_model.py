@@ -105,7 +105,7 @@ class FisherAI(Module):
         save_time = time.time()
         self.train()
 
-        print(f'[+] Starting training on {torch.cuda.get_device_name(DEVICE)} for {len(self.dataset):,} positions')
+        print(f'[+] Starting training on {DEVICE} for {len(self.dataset):,} positions')
         for epoch in range(1000):
             total_loss = 0.0
             for batch_idx, (boards, values, move_idx) in enumerate(self.dataloader):
@@ -169,35 +169,26 @@ class FisherAI(Module):
         self.encode_board_inplace(board, self.encode_buffer)
         return self.encode_buffer.copy()
 
+    @torch.no_grad()
     def predict(self, array):
         self.eval()
-        x = array.to(DEVICE)
-        with torch.no_grad():
-            logp = F.log_softmax(self.forward(x).squeeze(0), dim=-1)
-        
-        arr = x.squeeze(0).cpu().tolist()
+        flat = array.view(-1).detach().cpu().numpy()
+
         board = chess.Board.empty()
-        for sq, v in enumerate(array.view(-1)):
-            if v > 1:
+        for sq, v in enumerate(flat):
+            if int(v) > 1:
                 ptype, color = rlookup[int(v)]
                 board.set_piece_at(sq, chess.Piece(ptype, bool(color)))
-            
-            best_score, best_board = float('-inf'), np.array(arr, dtype=np.int64)
-            for move in board.legal_moves:
-                b2 = board.copy(stack=False)
-                b2.push(move)
-                target = self.encode_board(b2)
-
-                idx = torch.as_tensor(target, device=logp.device, dtype=torch.long).view(-1, 1)
-                score = logp.gather(1, idx).sum().item()
-
-                if score > best_score:
-                    best_score = score
-                    best_board = target
         
-        self.display_board(best_board)
+        moves, _ = self.suggest_moves(board, k=1)
+        if not moves:
+            return array
         
-        return torch.as_tensor([best_board], dtype=torch.long)
+        move = moves[0]
+        board.push(move)
+
+        self.encode_board_inplace(board, self.encode_buffer)
+        return torch.from_numpy(self.encode_buffer.copy()).long().unsqueeze(0)
     
     def display_board(self, array):
         array = array.reshape(8,8)
@@ -289,7 +280,7 @@ class FisherAI(Module):
         alpha = -math.inf
         beta = math.inf
 
-        moves, _ = self.suggest_moves(board, k=5)
+        moves, _ = self.suggest_moves(board, k=k)
         if not moves:
             moves = list(board.legal_moves)
         if not moves:
