@@ -99,9 +99,8 @@ class FisherAI(Module):
             batch_first=True
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
-
-        self.value_head = nn.Linear(d_model, 1)
-        self.policy_head = nn.Linear(d_model, 64 * 64)
+        self.value_head = nn.Linear(d_model * 64, 1)
+        self.policy_head = nn.Linear(d_model, 64)
 
         self.stock_fish_path = '/usr/bin/stockfish'
         self.board_buffer = np.empty(64, dtype=np.int64)
@@ -121,10 +120,10 @@ class FisherAI(Module):
         x = self.dropout(x)
         x = self.encoder(x)
 
-        pooled = x.mean(dim=1)
-
-        value = self.value_head(pooled).squeeze(-1)
-        policy = self.policy_head(pooled)
+        x_flat = x.reshape(B, 64 * self.d_model)
+        value = self.value_head(x_flat).squeeze(-1)
+        policy_per_square = self.policy_head(x)
+        policy = policy_per_square.reshape(B, 64 * 64)
 
         return value, policy
 
