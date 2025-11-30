@@ -58,6 +58,7 @@ class FisherAI(Module):
         self.stock_fish_path = '/usr/bin/stockfish'
         self.encode_buffer = np.empty(64, dtype=np.int64)
         self.fen_buffer = np.empty(64, dtype=np.int64)
+        self.square_indices = np.arange(64, dtype=np.int64)
         
         self.piece_embedding = nn.Embedding(14, self.d_model, padding_idx=0)
         self.position_embedding = nn.Embedding(64, self.d_model)
@@ -151,8 +152,7 @@ class FisherAI(Module):
     def fen_to_tensor(self, fen):
         board = chess.Board(fen)
         self.encode_board_inplace(board, self.fen_buffer)
-        array = self.fen_buffer[None, :].copy()
-        return torch.as_tensor(array, dtype=torch.long)
+        return torch.from_numpy(self.fen_buffer).long().unsqueeze(0)
     
     def encode_board_inplace(self, board, dest):
         dest.fill(1)
@@ -210,11 +210,37 @@ class FisherAI(Module):
         best_score = float('-inf')
         best_move = None
 
-        lagal_moves = list(board.legal_moves)
-        for move in lagal_moves:
+        legal_moves = list(board.legal_moves)
+        for move in legal_moves:
             board.push(move)
             self.encode_board_inplace(board, self.encode_buffer)
-            score = logp_np[np.arange(64), self.encode_buffer].sum()
+            score = logp_np[self.square_indices, self.encode_buffer].sum()
+            board.pop()
+
+            if score > best_score:
+                best_score = score
+                best_move = move
+        
+        return best_move
+    
+    @torch.no_grad()
+    def best_move_from_board(self, board):
+        ''' Get the best move from a chess.Board object '''
+        self.encode_board_inplace(board, self.fen_buffer)
+        x = torch.from_numpy(self.fen_buffer).long().unsqueeze(0).to(DEVICE)
+        
+        self.eval()
+        logp = F.log_softmax(self.forward(x).squeeze(0), dim=-1)
+        logp_np = logp.detach().cpu().numpy()
+
+        best_score = float('-inf')
+        best_move = None
+
+        legal_moves = list(board.legal_moves)
+        for move in legal_moves:
+            board.push(move)
+            self.encode_board_inplace(board, self.encode_buffer)
+            score = logp_np[self.square_indices, self.encode_buffer].sum()
             board.pop()
 
             if score > best_score:
@@ -236,6 +262,7 @@ class FisherAI(Module):
         no_games = 50
 
         print('[+] Starting evaulation')
+        start = time.time()
         for game in range(no_games):
             board = chess.Board()
             while not board.is_game_over():
@@ -248,8 +275,7 @@ class FisherAI(Module):
                     break
                 
                 # FisherAI move
-                fen = board.fen()
-                move = self.best_move_from_fen(fen)
+                move = self.best_move_from_board(board)
                 board.push(move)
             
             # Add scores
@@ -266,7 +292,7 @@ class FisherAI(Module):
         else:
             elo = stock_fish_elo + 400 * math.log10(score / (1 - score))
         
-        print(f'[+] Evaluation completed, FisherAI ELO {elo:.2f}')
+        print(f'[+] Evaluation completed {time.time() - start:.2f} seconds, FisherAI ELO {elo:.2f}')
         engine.quit()
 
 if __name__ == '__main__':
