@@ -50,16 +50,16 @@ class ChessDataset(Dataset):
             path = os.path.join(DATASET_PATH, fname)
             data = torch.load(path, map_location="cpu", weights_only=False)
 
-            for boards_tensor, turns_tensor, moves_idx_tensor, result_white in data:
+            for boards_tensor, turns_tensor, moves_idx_tensor, values_tensor in data:
                 boards_tensor = boards_tensor.long()
                 turns_tensor = turns_tensor.long()
                 moves_idx_tensor = moves_idx_tensor.long()
+                values_tensor = values_tensor.float()
                 num_positions = boards_tensor.shape[0]
 
                 for ply_idx in range(num_positions):
                     board64 = boards_tensor[ply_idx]
-                    whites_turn = bool(turns_tensor[ply_idx].item())
-                    value = float(result_white if whites_turn else -result_white)
+                    value = float(values_tensor[ply_idx].item())
                     move_idx = int(moves_idx_tensor[ply_idx].item())
 
                     self.training_data.append((board64, value, move_idx))
