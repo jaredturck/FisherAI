@@ -5,7 +5,7 @@ from torch.nn.utils.rnn import pad_sequence
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-import torch, os, time, datetime, chess, chess.engine
+import torch, os, time, datetime, math, chess, chess.engine
 
 lookup = {(1,0) : 2,(2,0) : 3,(3,0) : 4,(4,0) : 5,(5,0) : 6,(6,0) : 7,(1,1) : 8,(2,1) : 9,(3,1) : 10,(4,1) : 11,(5,1) : 12,(6,1) : 13}
 piece_lookup = {0: ' ',1: '.',2: 'p',3: 'n',4: 'b',5: 'r',6: 'q',7: 'k',8: 'P',9: 'N',10: 'B',11: 'R',12: 'Q',13: 'K'}
@@ -226,29 +226,49 @@ class FisherAI(Module):
     def engine_vs_stockfish(self):
         ''' Evaulte how good the engine is by playing ti against stockfish '''
         
+        stock_fish_elo = 1320
         engine = chess.engine.SimpleEngine.popen_uci(self.stock_fish_path)
-        engine.configure({'UCI_Elo' : 1320, 'UCI_LimitStrength' : True})
+        engine.configure({'UCI_Elo' : stock_fish_elo, 'UCI_LimitStrength' : True})
 
         model = FisherAI().to(DEVICE)
         model.load_weights()
 
-        board = chess.Board()
-        while not board.is_game_over():
-            if board.turn == chess.WHITE:
-                result = engine.play(board, chess.engine.Limit(time=0.2))
+        scores = {'stockfish' : 0, 'fisherai' : 0, 'draws' : 0}
+        result_map = {'1-0' : 'stockfish', '0-1' : 'fisherai', '1/2-1/2' : 'draws'}
+        no_games = 50
+
+        print('[+] Starting evaulation')
+        for game in range(no_games):
+
+            board = chess.Board()
+            while not board.is_game_over():
+
+                # Stockfish move
+                result = engine.play(board, chess.engine.Limit(time=0.05))
                 move = result.move
                 board.push(move)
-                print(f'[{board.fullmove_number}] Stockfish played {move.uci()}')
 
-            else:
-                fen = board.fen()
-                move = model.best_move_from_fen(fen)
-                board.push(move)
-                print(f'[{board.fullmove_number}] FisherAI played {move.uci()}')
-                print(board)
+                # FisherAI move
+                if not board.is_game_over():
+                    fen = board.fen()
+                    move = model.best_move_from_fen(fen)
+                    board.push(move)
+            
+            # Add scores
+            scores[result_map[board.result()]] += 1
+            print(f'Game {game+1} of {no_games}, {result_map.get(board.result())} won, result: {board.result()}')
         
-        winner = {'1-0' : 'Stockfish', '0-1' : 'FisherAI', '1/2-1/2' : 'Draw'}
-        print(f'Game over {winner.get(board.result())} won, result: {board.result()}')
+        # Calculate FisherAI ELO
+        print(f'\n{scores}')
+        score = (scores['fisherai'] + 0.5 * scores['draws']) / no_games
+        if score <= 0.0:
+            elo = float('-inf')
+        elif score >= 1.0:
+            elo = float('inf')
+        else:
+            elo = stock_fish_elo + 400 * math.log10(score / (1 - score))
+        
+        print(f'[+] Evaluation completed, FisherAI ELO {elo:.2f}')
 
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == 'train':
