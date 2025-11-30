@@ -46,50 +46,30 @@ class ChessDataset(Dataset):
         return x,y
 
 class FisherAI(Module):
-    def __init__(self):
+    def __init__(self, emb_dim=16, hidden_dim=256):
         super().__init__()
-        self.d_model = 512
-        self.nheads = self.d_model // 64
-        self.dim_feedforward = self.d_model * 4
-        self.no_transformer_layers = self.d_model // 128
-        self.dropout = 0.05
-        self.dataset = ChessDataset()
-        self.optimizer = None
+        self.embedding = nn.Embedding(14, emb_dim, padding_idx=0)
+        in_dim = 64 * emb_dim + 6
+
+        self.fc1 = nn.Linear(in_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim // 2)
+        self.fc3 = nn.Linear(hidden_dim // 2, 1)
+        self.relu = nn.ReLU()
+
         self.stock_fish_path = '/usr/bin/stockfish'
-        self.encode_buffer = np.empty(64, dtype=np.int64)
-        self.fen_buffer = np.empty(64, dtype=np.int64)
-        self.square_indices = np.arange(64, dtype=np.int64)
-        
-        self.piece_embedding = nn.Embedding(14, self.d_model, padding_idx=0)
-        self.position_embedding = nn.Embedding(64, self.d_model)
-        self.em_dropout = nn.Dropout(self.dropout)
+        self.board_buffer = np.empty(64, dtype=np.int64)
+        self.feature_buffer = np.empty(6, dtype=np.float32)
 
-        self.encoder_layer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(
-                d_model=self.d_model,
-                nhead=self.nheads,
-                dim_feedforward=self.dim_feedforward,
-                dropout=self.dropout,
-                batch_first=True
-            ),
-            num_layers=self.no_transformer_layers
-        )
-        self.piece_head = nn.Linear(self.d_model, 14)
+    def forward(self, board, feature_tensor):
+        x = self.embedding(board)
+        x = x.view(x.size(0), -1)
+        x = torch.cat((x, feature_tensor), dim=1)
 
-    def forward(self, x):
+        x = self.relu(self.fc1(x))
+        x = self.relu(self.fc2(x))
+        x = self.fc3(x)
 
-        B,S = x.shape
-        pos = self.position_embedding(torch.arange(S, device=DEVICE)).unsqueeze(0).expand(B, S, -1)
-
-        x = self.piece_head(
-            self.encoder_layer(
-                self.em_dropout(
-                    self.piece_embedding(x) + pos
-                )
-            )
-        )
-
-        return x
+        return x.squeeze(-1)
     
     def train_model(self):
         self.dataset.read_data()
@@ -163,6 +143,16 @@ class FisherAI(Module):
         self.encode_board_inplace(board, self.encode_buffer)
         return self.encode_buffer.copy()
     
+    def encode_features(self, board):
+        fb = self.feature_buffer
+        fb[0] = 1.0 if board.turn == chess.WHITE else 0.0
+        fb[1] = 1.0 if board.has_kingside_castling_rights(chess.WHITE) else 0.0
+        fb[2] = 1.0 if board.has_queenside_castling_rights(chess.WHITE) else 0.0
+        fb[3] = 1.0 if board.has_kingside_castling_rights(chess.BLACK) else 0.0
+        fb[4] = 1.0 if board.has_queenside_castling_rights(chess.BLACK) else 0.0
+        fb[5] = 1.0 if board.ep_square is not None else 0.0
+        return fb
+    
     def predict(self, array):
         self.eval()
         x = array.to(DEVICE)
@@ -202,45 +192,21 @@ class FisherAI(Module):
     def best_move_from_fen(self, fen):
         ''' Get the best move from a FEN string '''
         board = chess.Board(fen)
-        x = self.fen_to_tensor(fen).to(DEVICE)
-        self.eval()
-        logp = F.log_softmax(self.forward(x).squeeze(0), dim=-1)
-        logp_np = logp.detach().cpu().numpy()
-
-        best_score = float('-inf')
-        best_move = None
-
-        legal_moves = list(board.legal_moves)
-        for move in legal_moves:
-            board.push(move)
-            self.encode_board_inplace(board, self.encode_buffer)
-            score = logp_np[self.square_indices, self.encode_buffer].sum()
-            board.pop()
-
-            if score > best_score:
-                best_score = score
-                best_move = move
-        
-        return best_move
+        return self.best_move_from_board(board)
     
     @torch.no_grad()
     def best_move_from_board(self, board):
         ''' Get the best move from a chess.Board object '''
-        self.encode_board_inplace(board, self.fen_buffer)
-        x = torch.from_numpy(self.fen_buffer).long().unsqueeze(0).to(DEVICE)
-        
-        self.eval()
-        logp = F.log_softmax(self.forward(x).squeeze(0), dim=-1)
-        logp_np = logp.detach().cpu().numpy()
-
-        best_score = float('-inf')
-        best_move = None
-
         legal_moves = list(board.legal_moves)
+        if not legal_moves:
+            return None
+        
+        best_move = None
+        best_score = float('-inf')
+
         for move in legal_moves:
             board.push(move)
-            self.encode_board_inplace(board, self.encode_buffer)
-            score = logp_np[self.square_indices, self.encode_buffer].sum()
+            score = self.evaluate_position(board)
             board.pop()
 
             if score > best_score:
@@ -251,28 +217,23 @@ class FisherAI(Module):
     
     @torch.no_grad()
     def evaluate_position(self, board):
-        self.encode_board_inplace(board, self.fen_buffer)
-        x = torch.from_numpy(self.fen_buffer).long().unsqueeze(0).to(DEVICE)
+        if board.is_game_over():
+            result = board.result()
+            if result == '1-0':
+                return 1e4 if board.turn == chess.WHITE else -1e4
+            elif result == '0-1':
+                return 1e4 if board.turn == chess.BLACK else -1e4
+            else:
+                return 0.0
+        
+        self.encode_board_inplace(board, self.board_buffer)
+        board_tensor = torch.from_numpy(self.board_buffer).long().unsqueeze(0).to(DEVICE)
+        feature_np = self.encode_features(board)
+        feature_tensor = torch.from_numpy(feature_np).float().unsqueeze(0).to(DEVICE)
 
         self.eval()
-        logp = F.log_softmax(self.forward(x).squeeze(0), dim=-1)
-        logp_np = logp.detach().cpu().numpy()
-
-        best_score = float('-inf')
-        legal_moves = list(board.legal_moves)
-        if not legal_moves:
-            return -1e9
-        
-        for move in legal_moves:
-            board.push(move)
-            self.encode_board_inplace(board, self.encode_buffer)
-            score = logp_np[self.square_indices, self.encode_buffer].sum()
-            board.pop()
-
-            if score > best_score:
-                best_score = score
-        
-        return best_score
+        value = self.forward(board_tensor, feature_tensor)
+        return float(value.item())
     
     def negamax_search(self, board, depth, alpha, beta, start_time, time_limit):
         if depth == 0 or board.is_game_over() or (time.time() - start_time) > time_limit:
