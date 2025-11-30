@@ -32,12 +32,16 @@ class ChessDataset(Dataset):
             if file.endswith('.pt'):
                 data = torch.load(os.path.join(DATASET_PATH, file), map_location='cpu', weights_only=False)
                 for game in data:
-                    g = torch.as_tensor(game, dtype=torch.long)
-                    x = g[:-1]
-                    y = g[1:]
-                    self.training_data.append((x,y))
+                    boards = torch.as_tensor(game['boards'], dtype=torch.long)
+                    result_white = float(game['result'])
+
+                    for i in range(boards.shape[0]):
+                        board64 = boards[i]
+                        whites_turn = i % 2 == 0
+                        value = result_white if whites_turn else -result_white
+                        self.training_data.append((board64, value))
         
-        print(f'[+] Loaded {len(self.training_data):,} games')
+        print(f'[+] Loaded {len(self.training_data):,} positions')
     
     def collate_fn(self, batch):
         x,y = zip(*batch)
