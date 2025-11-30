@@ -16,7 +16,7 @@ TARGET_LOSS = 2
 if platform.uname().node == 'Jared-PC':
     DATASET_PATH = 'datasets/'
     WEIGHTS_PATH = 'weights/'
-    BATCH_SIZE = 1200
+    BATCH_SIZE = 1024
     MAX_FILES = 8
 else:
     DATASET_PATH = 'datasets/'
@@ -389,7 +389,7 @@ class FisherAI(Module):
                     break
                 
                 # FisherAI move
-                move = self.best_move_negamax(board, depth=2, time_limit=5)
+                move = self.best_move_negamax(board, depth=3, time_limit=5)
                 if move is None:
                     break
                 board.push(move)

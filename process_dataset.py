@@ -43,8 +43,6 @@ def process_chunk_worker(chunk_text, lookup, worker_id, shard_size, shard_prefix
                 game_array[num, sq] = lookup[(piece.piece_type, int(piece.color))]
 
             turns_array[num] = 1 if board.turn == chess.WHITE else 0
-            moves_idx_array[num] = move.from_square * 64 + move.to_square
-
             info = engine.analyse(board, eval_limit)
             score = info["score"].pov(board.turn)
 
@@ -56,6 +54,8 @@ def process_chunk_worker(chunk_text, lookup, worker_id, shard_size, shard_prefix
 
             cp = max(-1000, min(1000, cp))
             values_array[num] = cp / 1000.0
+            best_move = info["pv"][0]
+            moves_idx_array[num] = best_move.from_square * 64 + best_move.to_square
             board.push(move)
 
         training_data.append(
