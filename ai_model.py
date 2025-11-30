@@ -250,6 +250,85 @@ class FisherAI(Module):
         return best_move
     
     @torch.no_grad()
+    def evaluate_position(self, board):
+        self.encode_board_inplace(board, self.fen_buffer)
+        x = torch.from_numpy(self.fen_buffer).long().unsqueeze(0).to(DEVICE)
+
+        self.eval()
+        logp = F.log_softmax(self.forward(x).squeeze(0), dim=-1)
+        logp_np = logp.detach().cpu().numpy()
+
+        best_score = float('-inf')
+        legal_moves = list(board.legal_moves)
+        if not legal_moves:
+            return -1e9
+        
+        for move in legal_moves:
+            board.push(move)
+            self.encode_board_inplace(board, self.encode_buffer)
+            score = logp_np[self.square_indices, self.encode_buffer].sum()
+            board.pop()
+
+            if score > best_score:
+                best_score = score
+        
+        return best_score
+    
+    def negamax_search(self, board, depth, alpha, beta, start_time, time_limit):
+        if depth == 0 or board.is_game_over() or (time.time() - start_time) > time_limit:
+            return self.evaluate_position(board)
+
+        best = float('-inf')
+        for move in board.legal_moves:
+            board.push(move)
+            score = -self.negamax_search(board, depth - 1, -beta, -alpha, start_time, time_limit)
+            board.pop()
+
+            if score > best:
+                best = score
+            if best > alpha:
+                alpha = best
+            if alpha >= beta:
+                break
+
+            if time.time() - start_time > time_limit:
+                break
+        
+        return best
+    
+    def best_move_negamax(self, board, depth = 2, time_limit=5):
+        start_time = time.time()
+        best_move = None
+        best_score = float('-inf')
+
+        alpha = -math.inf
+        beta = math.inf
+
+        legal_moves = list(board.legal_moves)
+        if not legal_moves:
+            return None
+
+        for move in board.legal_moves:
+            if time.time() - start_time > time_limit:
+                break
+
+            board.push(move)
+            score = -self.negamax_search(board, depth - 1, -beta, -alpha, start_time, time_limit)
+            board.pop()
+
+            if score > best_score:
+                best_score = score
+                best_move = move
+            
+            if score > alpha:
+                alpha = score
+        
+        if best_move is None:
+            best_move = self.best_move_from_board(board)
+        
+        return best_move
+    
+    @torch.no_grad()
     def engine_vs_stockfish(self):
         ''' Evaulte how good the engine is by playing ti against stockfish '''
         
@@ -275,7 +354,7 @@ class FisherAI(Module):
                     break
                 
                 # FisherAI move
-                move = self.best_move_from_board(board)
+                move = self.best_move_negamax(board, depth=2, time_limit=5)
                 board.push(move)
             
             # Add scores
