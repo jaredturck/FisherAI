@@ -1,7 +1,6 @@
 import sys
 from torch.utils.data import Dataset
 from torch.nn import Module
-from torch.nn.utils.rnn import pad_sequence
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
@@ -18,15 +17,17 @@ if platform.uname().node == 'Jared-PC':
     DATASET_PATH = 'datasets/'
     WEIGHTS_PATH = 'weights/'
     BATCH_SIZE = 4096
+    MAX_FILES = 128
 else:
     DATASET_PATH = 'datasets/'
     WEIGHTS_PATH = 'weights/'
     BATCH_SIZE = 4096
+    MAX_FILES = 64
 
 class ChessDataset(Dataset):
     def __init__(self):
         self.training_data = []
-        self.max_files = 16
+        self.max_files = MAX_FILES
 
     def __len__(self):
         return len(self.training_data)
@@ -73,43 +74,66 @@ class ChessDataset(Dataset):
         return x, y, m
 
 class FisherAI(Module):
-    def __init__(self, emb_dim=16, hidden_dim=1024):
+    def __init__(self, d_model=256, n_layers=4, n_heads=8, ff_mult=4, dropout=0.1):
         super().__init__()
         self.dataset = ChessDataset()
         self.dataloader_workers = max(2, os.cpu_count() // 2)
         self.optimizer = None
         self.max_epochs = 1000
+        self.d_model = d_model
 
-        self.embedding = nn.Embedding(14, emb_dim, padding_idx=0)
-        self.fc1 = nn.Linear(64 * emb_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, hidden_dim)
-        self.relu = nn.ReLU()
+        self.piece_embedding = nn.Embedding(14, d_model, padding_idx=0)
+        self.pos_embedding = nn.Embedding(64, d_model)
+        self.dropout = nn.Dropout(dropout)
 
-        self.value_head = nn.Linear(hidden_dim, 1)
-        self.policy_head = nn.Linear(hidden_dim, 64 * 64)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=n_heads,
+            dim_feedforward=d_model * ff_mult,
+            dropout=dropout,
+            batch_first=True
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
+
+        self.value_head = nn.Linear(d_model, 1)
+        self.policy_head = nn.Linear(d_model, 64 * 64)
 
         self.stock_fish_path = '/usr/bin/stockfish'
         self.board_buffer = np.empty(64, dtype=np.int64)
         self.fen_buffer = np.empty(64, dtype=np.int64)
         self.encode_buffer = np.empty(64, dtype=np.int64)
 
-    def forward(self, board):
-        x = self.embedding(board)
-        x = x.view(x.size(0), -1)
-        x = self.relu(self.fc1(x))
-        x = self.relu(self.fc2(x))
-        x = self.relu(self.fc3(x))
+        self.register_buffer('pos_indices', torch.arange(64, dtype=torch.long))
 
-        value = self.value_head(x).squeeze(-1)
-        policy = self.policy_head(x)
+    def forward(self, board):
+        board_emb = self.piece_embedding(board)
+
+        B, S = board.shape
+        pos = self.pos_indices[:S].unsqueeze(0).expand(B, S)
+        pos_emb = self.pos_embedding(pos)
+
+        x = board_emb + pos_emb
+        x = self.dropout(x)
+        x = self.encoder(x)
+
+        pooled = x.mean(dim=1)
+
+        value = self.value_head(pooled).squeeze(-1)
+        policy = self.policy_head(pooled)
 
         return value, policy
-    
+
     def train_model(self):
         self.dataset.read_data()
-        self.dataloader = torch.utils.data.DataLoader(self.dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=self.dataset.collate_fn)
-        self.optimizer = torch.optim.AdamW(self.parameters(), lr=1e-4, weight_decay=1e-4, fused=True)
+        self.dataloader = torch.utils.data.DataLoader(
+            self.dataset,
+            batch_size=BATCH_SIZE,
+            shuffle=True,
+            collate_fn=self.dataset.collate_fn,
+            num_workers=self.dataloader_workers
+        )
+        self.optimizer = torch.optim.AdamW(self.parameters(), lr=1e-4, weight_decay=1e-4)
+
         value_loss_func = nn.MSELoss()
         policy_loss_func = nn.CrossEntropyLoss()
 
@@ -119,15 +143,15 @@ class FisherAI(Module):
         self.train()
 
         print(f'[+] Starting training on {DEVICE} for {len(self.dataset):,} positions, batch size {BATCH_SIZE}')
-        for epoch in range(1000):
+        for epoch in range(self.max_epochs):
             total_value_loss = 0.0
             total_policy_loss = 0.0
             total_loss = 0.0
 
             for batch_idx, (boards, values, move_idx) in enumerate(self.dataloader):
-                boards = boards.to(DEVICE)
-                values = values.to(DEVICE)
-                move_idx = move_idx.to(DEVICE)
+                boards = boards.to(DEVICE, non_blocking=True)
+                values = values.to(DEVICE, non_blocking=True)
+                move_idx = move_idx.to(DEVICE, non_blocking=True)
 
                 self.optimizer.zero_grad()
                 pred_value, policy_logits = self.forward(boards)
@@ -157,6 +181,7 @@ class FisherAI(Module):
 
             if avg_loss < TARGET_LOSS:
                 print(f'[+] Target loss reached, stopping training, loss {avg_loss:.2f}')
+                self.save_weights()
                 return
 
     def save_weights(self):
@@ -182,7 +207,7 @@ class FisherAI(Module):
                 self.load_state_dict(weights_data['weights'])
                 print(f'[+] Loaded weights from {max_file}')
 
-            if self.optimizer and 'optimizer' in weights_data:
+            if self.optimizer and 'optimizer' in weights_data and weights_data['optimizer'] is not None:
                 self.optimizer.load_state_dict(weights_data['optimizer'])
                 print(f'[+] Loaded optimizer state from {max_file}')
 
@@ -220,7 +245,6 @@ class FisherAI(Module):
 
         self.encode_board_inplace(board, self.encode_buffer)
         return torch.from_numpy(self.encode_buffer.copy()).long().unsqueeze(0)
-    
     def display_board(self, array):
         array = array.reshape(8,8)
         for i in range(8):
@@ -247,14 +271,12 @@ class FisherAI(Module):
         return top, float(value.item())
     
     @torch.no_grad()
-    def best_move_from_fen(self, fen):
-        ''' Get the best move from a FEN string '''
+    def best_move_from_fen(self, fen, k=5):
         board = chess.Board(fen)
-        return self.best_move_from_board(board)
+        return self.best_move_from_board(board, k=k)
     
     @torch.no_grad()
     def best_move_from_board(self, board, k=5):
-        ''' Get the best move from a chess.Board object '''
         moves, _ = self.suggest_moves(board, k)
         return moves[0] if moves else None
 
@@ -336,10 +358,9 @@ class FisherAI(Module):
             best_move = moves[0]
         
         return best_move
-    
     @torch.no_grad()
     def engine_vs_stockfish(self):
-        ''' Evaulte how good the engine is by playing ti against stockfish '''
+        '''Evaluate how good the engine is by playing it against Stockfish'''
         
         stock_fish_elo = 1320
         engine = chess.engine.SimpleEngine.popen_uci(self.stock_fish_path)
@@ -364,6 +385,8 @@ class FisherAI(Module):
                 
                 # FisherAI move
                 move = self.best_move_negamax(board, depth=2, time_limit=5)
+                if move is None:
+                    break
                 board.push(move)
             
             # Add scores
@@ -401,5 +424,7 @@ if __name__ == '__main__':
         model.load_weights()
         while True:
             fen = input('Enter FEN: ')
+            if not fen.strip():
+                break
             move = model.best_move_from_fen(fen)
             print(f'Best move: {move}')
