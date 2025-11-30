@@ -5,7 +5,7 @@ from torch.nn.utils.rnn import pad_sequence
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-import torch, os, time, datetime, chess
+import torch, os, time, datetime, chess, chess.engine
 
 lookup = {(1,0) : 2,(2,0) : 3,(3,0) : 4,(4,0) : 5,(5,0) : 6,(6,0) : 7,(1,1) : 8,(2,1) : 9,(3,1) : 10,(4,1) : 11,(5,1) : 12,(6,1) : 13}
 piece_lookup = {0: ' ',1: '.',2: 'p',3: 'n',4: 'b',5: 'r',6: 'q',7: 'k',8: 'P',9: 'N',10: 'B',11: 'R',12: 'Q',13: 'K'}
@@ -55,6 +55,7 @@ class FisherAI(Module):
         self.dropout = 0.05
         self.dataset = ChessDataset()
         self.optimizer = None
+        self.stock_fish_path = '/usr/bin/stockfish'
         
         self.piece_embedding = nn.Embedding(14, self.d_model, padding_idx=0)
         self.position_embedding = nn.Embedding(64, self.d_model)
@@ -194,6 +195,60 @@ class FisherAI(Module):
         array = array.reshape(8,8)
         for i in range(8):
             print('|'.join(piece_lookup[int(array[i, j])] for j in range(8)))
+    
+    @torch.no_grad()
+    def best_move_from_fen(self, fen):
+        ''' Get the best move from a FEN string '''
+        board = chess.Board(fen)
+        array = self.fen_to_tensor(fen)
+        x = array.to(DEVICE)
+
+        self.eval()
+        logp = F.log_softmax(self.forward(x).squeeze(0), dim=-1)
+        best_score = float('-inf')
+        best_move = None
+
+        for move in board.legal_moves:
+            b2 = board.copy(stack=False)
+            b2.push(move)
+            target = self.encode_board(b2)
+
+            idx = torch.as_tensor(target, device=logp.device, dtype=torch.long).view(-1, 1)
+            score = logp.gather(1, idx).sum().item()
+
+            if score > best_score:
+                best_score = score
+                best_move = move
+        
+        return best_move
+    
+    @torch.no_grad()
+    def engine_vs_stockfish(self):
+        ''' Evaulte how good the engine is by playing ti against stockfish '''
+        
+        engine = chess.engine.SimpleEngine.popen_uci(self.stock_fish_path)
+        engine.configure({'UCI_Elo' : 1320, 'UCI_LimitStrength' : True})
+
+        model = FisherAI().to(DEVICE)
+        model.load_weights()
+
+        board = chess.Board()
+        while not board.is_game_over():
+            if board.turn == chess.WHITE:
+                result = engine.play(board, chess.engine.Limit(time=0.2))
+                move = result.move
+                board.push(move)
+                print(f'[{board.fullmove_number}] Stockfish played {move.uci()}')
+
+            else:
+                fen = board.fen()
+                move = model.best_move_from_fen(fen)
+                board.push(move)
+                print(f'[{board.fullmove_number}] FisherAI played {move.uci()}')
+                print(board)
+        
+        winner = {'1-0' : 'Stockfish', '0-1' : 'FisherAI', '1/2-1/2' : 'Draw'}
+        print(f'Game over {winner.get(board.result())} won, result: {board.result()}')
 
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == 'train':
@@ -203,9 +258,15 @@ if __name__ == '__main__':
         except KeyboardInterrupt:
             model.save_weights()
     
+    elif len(sys.argv) > 1 and sys.argv[1] == 'test':
+        model = FisherAI().to(DEVICE)
+        model.load_weights()
+        model.engine_vs_stockfish()
+    
     else:
         model = FisherAI().to(DEVICE)
         model.load_weights()
         while True:
             fen = input('Enter FEN: ')
-            # model.predict(fen)
+            move = model.best_move_from_fen(fen)
+            print(f'Best move: {move}')
