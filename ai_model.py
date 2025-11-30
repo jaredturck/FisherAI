@@ -73,7 +73,7 @@ class ChessDataset(Dataset):
         return x, y, m
 
 class FisherAI(Module):
-    def __init__(self, emb_dim=16, hidden_dim=512):
+    def __init__(self, emb_dim=16, hidden_dim=1024):
         super().__init__()
         self.dataset = ChessDataset()
         self.dataloader_workers = max(2, os.cpu_count() // 2)
@@ -83,6 +83,7 @@ class FisherAI(Module):
         self.embedding = nn.Embedding(14, emb_dim, padding_idx=0)
         self.fc1 = nn.Linear(64 * emb_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, hidden_dim)
         self.relu = nn.ReLU()
 
         self.value_head = nn.Linear(hidden_dim, 1)
@@ -98,6 +99,7 @@ class FisherAI(Module):
         x = x.view(x.size(0), -1)
         x = self.relu(self.fc1(x))
         x = self.relu(self.fc2(x))
+        x = self.relu(self.fc3(x))
 
         value = self.value_head(x).squeeze(-1)
         policy = self.policy_head(x)
@@ -106,8 +108,7 @@ class FisherAI(Module):
     
     def train_model(self):
         self.dataset.read_data()
-        self.dataloader = torch.utils.data.DataLoader(self.dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=self.dataset.collate_fn,
-            num_workers=self.dataloader_workers, pin_memory=True, persistent_workers=True, prefetch_factor=4)
+        self.dataloader = torch.utils.data.DataLoader(self.dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=self.dataset.collate_fn)
         self.optimizer = torch.optim.AdamW(self.parameters(), lr=1e-4, weight_decay=1e-4, fused=True)
         value_loss_func = nn.MSELoss()
         policy_loss_func = nn.CrossEntropyLoss()
