@@ -1,6 +1,7 @@
 import io, time, zstandard, chess.pgn, torch, os
 import numpy as np
 import multiprocessing as mp
+import chess.engine
 
 OUTPUT_DIR = 'datasets'
 
@@ -12,19 +13,18 @@ def process_chunk_worker(chunk_text, lookup, worker_id, shard_size, shard_prefix
     processed_games = 0
     start = time.time()
 
+    stockfish_path = "/usr/bin/stockfish"
+    engine = chess.engine.SimpleEngine.popen_uci(stockfish_path)
+    engine.configure({'Threads': 1, 'Hash': 16})
+    eval_limit = chess.engine.Limit(time=0.01)
+
     while True:
         game = chess.pgn.read_game(text_io)
         if game is None:
             break
 
         result_str = game.headers.get("Result", "*")
-        if result_str == "1-0":
-            result = 1.0
-        elif result_str == "0-1":
-            result = -1.0
-        elif result_str == "1/2-1/2":
-            result = 0.0
-        else:
+        if result_str not in ("1-0", "0-1", "1/2-1/2"):
             continue
 
         board = game.board()
@@ -36,6 +36,7 @@ def process_chunk_worker(chunk_text, lookup, worker_id, shard_size, shard_prefix
         game_array = np.ones((n, 64), dtype=np.int64)
         turns_array = np.empty(n, dtype=np.int8)
         moves_idx_array = np.empty(n, dtype=np.int64)
+        values_array = np.empty(n, dtype=np.float32)
 
         for num, move in enumerate(moves):
             for sq, piece in board.piece_map().items():
@@ -43,9 +44,28 @@ def process_chunk_worker(chunk_text, lookup, worker_id, shard_size, shard_prefix
 
             turns_array[num] = 1 if board.turn == chess.WHITE else 0
             moves_idx_array[num] = move.from_square * 64 + move.to_square
+
+            info = engine.analyse(board, eval_limit)
+            score = info["score"].pov(board.turn)
+
+            if score.is_mate():
+                mate_score = score.mate()
+                cp = 1000 * (1 if mate_score > 0 else -1)
+            else:
+                cp = score.cp
+
+            cp = max(-1000, min(1000, cp))
+            values_array[num] = cp / 1000.0
             board.push(move)
 
-        training_data.append((torch.from_numpy(game_array), torch.from_numpy(turns_array), torch.from_numpy(moves_idx_array), result))
+        training_data.append(
+            (
+                torch.from_numpy(game_array),
+                torch.from_numpy(turns_array),
+                torch.from_numpy(moves_idx_array),
+                torch.from_numpy(values_array),
+            )
+        )
         processed_games += 1
 
         if len(training_data) >= shard_size:
@@ -61,6 +81,8 @@ def process_chunk_worker(chunk_text, lookup, worker_id, shard_size, shard_prefix
     if training_data:
         fname = f"{shard_prefix}_w{worker_id}_{save_file:03d}_{len(training_data)}.pt"
         torch.save(training_data, os.path.join(OUTPUT_DIR, fname))
+
+    engine.quit()
 
 class PrepareDataset:
     def __init__(self):
@@ -132,4 +154,4 @@ class PrepareDataset:
 
 if __name__ == "__main__":
     db = PrepareDataset()
-    db.process_db(chunk_size_bytes=10_000_000_000, num_workers=os.cpu_count(), shard_size=1_000_000_000)
+    db.process_db(chunk_size_bytes=1_000_000, num_workers=os.cpu_count(), shard_size=50_000)
