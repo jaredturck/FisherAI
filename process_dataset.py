@@ -31,7 +31,7 @@ def process_chunk_worker(chunk_text, lookup, worker_id, shard_size, shard_prefix
         moves = list(game.mainline_moves())
         if not moves:
             continue
-        
+
         n = len(moves)
         game_array = np.ones((n, 64), dtype=np.int64)
         turns_array = np.empty(n, dtype=np.int8)
@@ -39,12 +39,17 @@ def process_chunk_worker(chunk_text, lookup, worker_id, shard_size, shard_prefix
         values_array = np.empty(n, dtype=np.float32)
 
         for num, move in enumerate(moves):
+            game_array[num].fill(1)
             for sq, piece in board.piece_map().items():
                 game_array[num, sq] = lookup[(piece.piece_type, int(piece.color))]
 
             turns_array[num] = 1 if board.turn == chess.WHITE else 0
+            moves_idx_array[num] = move.from_square * 64 + move.to_square
+            mover_color = board.turn
+            board.push(move)
+
             info = engine.analyse(board, eval_limit)
-            score = info["score"].pov(board.turn)
+            score = info["score"].pov(mover_color)
 
             if score.is_mate():
                 mate_score = score.mate()
@@ -53,10 +58,7 @@ def process_chunk_worker(chunk_text, lookup, worker_id, shard_size, shard_prefix
                 cp = score.cp
 
             cp = max(-1000, min(1000, cp))
-            values_array[num] = cp / 1000.0
-            best_move = info["pv"][0]
-            moves_idx_array[num] = best_move.from_square * 64 + best_move.to_square
-            board.push(move)
+            values_array[num] = float(cp)
 
         training_data.append(
             (
