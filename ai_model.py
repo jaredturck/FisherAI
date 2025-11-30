@@ -16,12 +16,12 @@ TARGET_LOSS = 2
 if platform.uname().node == 'Jared-PC':
     DATASET_PATH = 'datasets/'
     WEIGHTS_PATH = 'weights/'
-    BATCH_SIZE = 4096
-    MAX_FILES = 128
+    BATCH_SIZE = 1200
+    MAX_FILES = 8
 else:
     DATASET_PATH = 'datasets/'
     WEIGHTS_PATH = 'weights/'
-    BATCH_SIZE = 4096
+    BATCH_SIZE = 16
     MAX_FILES = 64
 
 class ChessDataset(Dataset):
@@ -39,6 +39,7 @@ class ChessDataset(Dataset):
         self.training_data = []
         files = [f for f in os.listdir(DATASET_PATH) if f.endswith('.pt')]
         files.sort()
+        start_time = time.time()
 
         print('[+] Reading dataset')
         pos_count = 0
@@ -63,6 +64,10 @@ class ChessDataset(Dataset):
 
                     self.training_data.append((board64, value, move_idx))
                     pos_count += 1
+                
+                if time.time() - start_time > 10:
+                    start_time = time.time()
+                    print(f"[+] Loaded {pos_count:,} positions from {file_idx+1} of {min(len(files), self.max_files)} files")
 
         print(f"[+] Loaded {pos_count:,} positions")
     
