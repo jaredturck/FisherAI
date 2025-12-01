@@ -41,6 +41,7 @@ def process_chunk_worker(chunk_text, lookup, worker_id, no_pos_per_shared, shard
         values_array     = np.empty(n, dtype=np.float16)
         features_array   = np.empty((n, 6), dtype=np.uint8)
         move_targets_arr = np.zeros((n, 64 * 64), dtype=np.uint8)
+        legal_mask_arr   = np.zeros((n, 64 * 64), dtype=np.uint8)  # NEW
 
         for num, human_move in enumerate(moves):
             game_array[num].fill(1)
@@ -81,6 +82,7 @@ def process_chunk_worker(chunk_text, lookup, worker_id, no_pos_per_shared, shard
 
                 legal_indices.append(idx)
                 legal_cps.append(cp)
+                legal_mask_arr[num, idx] = 1
 
             best_cp = max(legal_cps)
             values_array[num] = np.float16(best_cp / 1000.0)
@@ -104,6 +106,7 @@ def process_chunk_worker(chunk_text, lookup, worker_id, no_pos_per_shared, shard
                 torch.from_numpy(move_targets_arr),
                 torch.from_numpy(values_array),
                 torch.from_numpy(features_array),
+                torch.from_numpy(legal_mask_arr),
             )
         )
         processed_games += 1

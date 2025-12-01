@@ -11,7 +11,7 @@ piece_lookup = {0: ' ',1: '.',2: 'p',3: 'n',4: 'b',5: 'r',6: 'q',7: 'k',8: 'P',9
 rlookup = {v : k for k,v in lookup.items()}
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-TARGET_LOSS = 2
+TARGET_LOSS = 0.2
 
 if platform.uname().node == 'Jared-PC':
     DATASET_PATH = 'datasets/'
@@ -50,11 +50,12 @@ class ChessDataset(Dataset):
             path = os.path.join(DATASET_PATH, fname)
             data = torch.load(path, map_location="cpu", weights_only=False)
 
-            for boards_tensor, move_targets_tensor, values_tensor, features_tensor in data:
+            for boards_tensor, move_targets_tensor, values_tensor, features_tensor, legal_mask_tensor in data:
                 boards_tensor       = boards_tensor.long()
                 move_targets_tensor = move_targets_tensor.float()
                 values_tensor       = values_tensor.float()
                 features_tensor     = features_tensor.float()
+                legal_mask_tensor   = legal_mask_tensor.float()
                 num_positions       = boards_tensor.shape[0]
 
                 for ply_idx in range(num_positions):
@@ -62,8 +63,9 @@ class ChessDataset(Dataset):
                     value     = float(values_tensor[ply_idx].item())
                     move_tgt  = move_targets_tensor[ply_idx]
                     feats     = features_tensor[ply_idx]
+                    legal_m   = legal_mask_tensor[ply_idx]
 
-                    self.training_data.append((board64, value, move_tgt, feats))
+                    self.training_data.append((board64, value, move_tgt, feats, legal_m))
                     pos_count += 1
                 
                 if time.time() - start_time > 10:
@@ -73,12 +75,13 @@ class ChessDataset(Dataset):
         print(f"[+] Loaded {pos_count:,} positions")
     
     def collate_fn(self, batch):
-        boards, values, move_targets, feats = zip(*batch)
+        boards, values, move_targets, feats, legal_masks = zip(*batch)
         x = torch.stack(boards, dim=0)
         y = torch.tensor(values, dtype=torch.float32)
         t = torch.stack(move_targets, dim=0).float()
         f = torch.stack(feats, dim=0).float()
-        return x, y, t, f
+        m = torch.stack(legal_masks, dim=0).float()
+        return x, y, t, f, m
 
 class FisherAI(Module):
     def __init__(self, d_model=256, n_layers=4, n_heads=8, ff_mult=4, dropout=0.1):
@@ -159,8 +162,7 @@ class FisherAI(Module):
         )
         self.optimizer = torch.optim.AdamW(self.parameters(), lr=1e-4, weight_decay=1e-4)
 
-        value_loss_func  = nn.MSELoss()
-        policy_loss_func = nn.BCEWithLogitsLoss()
+        value_loss_func = nn.MSELoss()
 
         self.load_weights()
         start = time.time()
@@ -173,25 +175,29 @@ class FisherAI(Module):
             total_policy_loss = 0.0
             total_loss        = 0.0
 
-            for batch_idx, (boards, values, move_targets, features) in enumerate(self.dataloader):
+            for batch_idx, (boards, values, move_targets, features, legal_mask) in enumerate(self.dataloader):
                 boards       = boards.to(DEVICE, non_blocking=True)
                 values       = values.to(DEVICE, non_blocking=True)
                 move_targets = move_targets.to(DEVICE, non_blocking=True)
                 features     = features.to(DEVICE, non_blocking=True)
+                legal_mask   = legal_mask.to(DEVICE, non_blocking=True).float()
 
                 self.optimizer.zero_grad()
                 pred_value, policy_logits = self.forward(boards, features)
 
-                loss_value  = value_loss_func(pred_value, values)
-                loss_policy = policy_loss_func(policy_logits, move_targets)
-                loss = loss_value + loss_policy
+                loss_value = value_loss_func(pred_value, values)
+                bce_sum = F.binary_cross_entropy_with_logits(policy_logits, move_targets, weight=legal_mask, reduction='sum')
+                denom = legal_mask.sum().clamp(min=1.0)
+                masked_policy_loss = bce_sum / denom
+
+                loss = loss_value + masked_policy_loss
 
                 loss.backward()
                 self.optimizer.step()
 
                 total_loss        += loss.item()
                 total_value_loss  += loss_value.item()
-                total_policy_loss += loss_policy.item()
+                total_policy_loss += masked_policy_loss.item()
 
                 if time.time() - start > 10:
                     start = time.time()
