@@ -83,8 +83,6 @@ def process_chunk_worker(chunk_text, lookup, worker_id, no_pos_per_shared, shard
 
                 legal_indices.append(idx)
                 legal_cps.append(cp)
-                no_positions_processed += 1
-                no_pos_counter += 1
 
             best_cp = max(legal_cps)
             values_array[num] = best_cp / 1000.0
@@ -98,6 +96,8 @@ def process_chunk_worker(chunk_text, lookup, worker_id, no_pos_per_shared, shard
 
             move_targets_arr[num] = targets
             board.push(human_move)
+            no_positions_processed += 1
+            no_pos_counter += 1
 
         training_data.append(
             (
@@ -119,7 +119,7 @@ def process_chunk_worker(chunk_text, lookup, worker_id, no_pos_per_shared, shard
 
         if time.time() - start > 10:
             start = time.time()
-            print(f"[worker {worker_id}] Processed {no_positions_processed} in {processed_games:,} games in this chunk")
+            print(f"[worker {worker_id}] Processed {no_positions_processed} positions in {processed_games:,} games in this chunk")
 
     if training_data:
         fname = f"{shard_prefix}_w{worker_id}_{save_file:03d}_{len(training_data)}.pt"
@@ -197,4 +197,4 @@ class PrepareDataset:
 
 if __name__ == "__main__":
     db = PrepareDataset()
-    db.process_db(chunk_size_bytes=1_000_000, num_workers=os.cpu_count(), no_pos_per_shared=50_000)
+    db.process_db(chunk_size_bytes=1_000_000, num_workers=os.cpu_count(), no_pos_per_shared=1000)
