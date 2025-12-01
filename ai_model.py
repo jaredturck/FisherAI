@@ -17,12 +17,12 @@ if platform.uname().node == 'Jared-PC':
     DATASET_PATH = 'datasets/'
     WEIGHTS_PATH = 'weights/'
     BATCH_SIZE = 1024
-    MAX_FILES = 8
+    MAX_FILES = 300
 else:
     DATASET_PATH = 'datasets/'
     WEIGHTS_PATH = 'weights/'
     BATCH_SIZE = 16
-    MAX_FILES = 64
+    MAX_FILES = 300
 
 class ChessDataset(Dataset):
     def __init__(self):
