@@ -16,7 +16,7 @@ def process_chunk_worker(chunk_text, lookup, worker_id, no_pos_per_shared, shard
     stockfish_path = "/usr/bin/stockfish"
     engine = chess.engine.SimpleEngine.popen_uci(stockfish_path)
     engine.configure({'Threads': 1, 'Hash': 16})
-    eval_limit = chess.engine.Limit(time=0.01)
+    eval_limit = chess.engine.Limit(nodes=200)
 
     GOOD_MARGIN_CP = 50
     no_positions_processed = 0
@@ -37,9 +37,7 @@ def process_chunk_worker(chunk_text, lookup, worker_id, no_pos_per_shared, shard
             continue
 
         n = len(moves)
-
         game_array       = np.ones((n, 64), dtype=np.uint8)
-        turns_array      = np.empty(n, dtype=np.uint8)
         values_array     = np.empty(n, dtype=np.float16)
         features_array   = np.empty((n, 6), dtype=np.uint8)
         move_targets_arr = np.zeros((n, 64 * 64), dtype=np.uint8)
@@ -49,7 +47,6 @@ def process_chunk_worker(chunk_text, lookup, worker_id, no_pos_per_shared, shard
             for sq, piece in board.piece_map().items():
                 game_array[num, sq] = lookup[(piece.piece_type, int(piece.color))]
 
-            turns_array[num]        = 1 if board.turn == chess.WHITE else 0
             features_array[num, 0]  = 1 if board.turn == chess.WHITE else 0
             features_array[num, 1]  = 1 if board.has_kingside_castling_rights(chess.WHITE) else 0
             features_array[num, 2]  = 1 if board.has_queenside_castling_rights(chess.WHITE) else 0
@@ -90,7 +87,8 @@ def process_chunk_worker(chunk_text, lookup, worker_id, no_pos_per_shared, shard
 
             threshold = best_cp - GOOD_MARGIN_CP
 
-            targets = np.zeros(64 * 64, dtype=np.uint8)
+            targets = move_targets_arr[num]
+            targets.fill(0)
             for idx, cp in zip(legal_indices, legal_cps):
                 if cp >= threshold:
                     targets[idx] = 1
@@ -103,7 +101,6 @@ def process_chunk_worker(chunk_text, lookup, worker_id, no_pos_per_shared, shard
         training_data.append(
             (
                 torch.from_numpy(game_array),
-                torch.from_numpy(turns_array),
                 torch.from_numpy(move_targets_arr),
                 torch.from_numpy(values_array),
                 torch.from_numpy(features_array),

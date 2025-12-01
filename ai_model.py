@@ -50,9 +50,8 @@ class ChessDataset(Dataset):
             path = os.path.join(DATASET_PATH, fname)
             data = torch.load(path, map_location="cpu", weights_only=False)
 
-            for boards_tensor, turns_tensor, move_targets_tensor, values_tensor, features_tensor in data:
+            for boards_tensor, move_targets_tensor, values_tensor, features_tensor in data:
                 boards_tensor       = boards_tensor.long()
-                turns_tensor        = turns_tensor.long()
                 move_targets_tensor = move_targets_tensor.float()
                 values_tensor       = values_tensor.float()
                 features_tensor     = features_tensor.float()
