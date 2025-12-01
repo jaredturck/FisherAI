@@ -11,7 +11,7 @@ piece_lookup = {0: ' ',1: '.',2: 'p',3: 'n',4: 'b',5: 'r',6: 'q',7: 'k',8: 'P',9
 rlookup = {v : k for k,v in lookup.items()}
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-TARGET_LOSS = 0.2
+TARGET_LOSS = 0.4
 
 if platform.uname().node == 'Jared-PC':
     DATASET_PATH = 'datasets/'

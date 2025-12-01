@@ -4,6 +4,8 @@ import multiprocessing as mp
 import chess.engine
 
 OUTPUT_DIR = 'datasets'
+STOCKFISH_NODES = 2_000
+GOOD_MARGIN_CP = 5
 
 def process_chunk_worker(chunk_text, lookup, worker_id, no_pos_per_shared, shard_prefix="training_data"):
     ''' Worker function to process a chunk of PGN text. '''
@@ -16,9 +18,8 @@ def process_chunk_worker(chunk_text, lookup, worker_id, no_pos_per_shared, shard
     stockfish_path = "/usr/bin/stockfish"
     engine = chess.engine.SimpleEngine.popen_uci(stockfish_path)
     engine.configure({'Threads': 1, 'Hash': 16})
-    eval_limit = chess.engine.Limit(nodes=200)
+    eval_limit = chess.engine.Limit(nodes=STOCKFISH_NODES)
 
-    GOOD_MARGIN_CP = 50
     no_positions_processed = 0
     no_pos_counter = 0
 
@@ -41,7 +42,7 @@ def process_chunk_worker(chunk_text, lookup, worker_id, no_pos_per_shared, shard
         values_array     = np.empty(n, dtype=np.float16)
         features_array   = np.empty((n, 6), dtype=np.uint8)
         move_targets_arr = np.zeros((n, 64 * 64), dtype=np.uint8)
-        legal_mask_arr   = np.zeros((n, 64 * 64), dtype=np.uint8)  # NEW
+        legal_mask_arr   = np.zeros((n, 64 * 64), dtype=np.uint8)
 
         for num, human_move in enumerate(moves):
             game_array[num].fill(1)
