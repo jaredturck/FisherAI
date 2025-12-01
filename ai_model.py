@@ -50,19 +50,21 @@ class ChessDataset(Dataset):
             path = os.path.join(DATASET_PATH, fname)
             data = torch.load(path, map_location="cpu", weights_only=False)
 
-            for boards_tensor, turns_tensor, moves_idx_tensor, values_tensor in data:
+            for boards_tensor, turns_tensor, moves_idx_tensor, values_tensor, features_tensor in data:
                 boards_tensor = boards_tensor.long()
                 turns_tensor = turns_tensor.long()
                 moves_idx_tensor = moves_idx_tensor.long()
                 values_tensor = values_tensor.float()
+                features_tensor = features_tensor.float()
                 num_positions = boards_tensor.shape[0]
 
                 for ply_idx in range(num_positions):
                     board64 = boards_tensor[ply_idx]
                     value = float(values_tensor[ply_idx].item())
                     move_idx = int(moves_idx_tensor[ply_idx].item())
+                    feats = features_tensor[ply_idx]
 
-                    self.training_data.append((board64, value, move_idx))
+                    self.training_data.append((board64, value, move_idx, feats))
                     pos_count += 1
                 
                 if time.time() - start_time > 10:
@@ -72,11 +74,12 @@ class ChessDataset(Dataset):
         print(f"[+] Loaded {pos_count:,} positions")
     
     def collate_fn(self, batch):
-        boards, values, move_idx = zip(*batch)
+        boards, values, move_idx, feats = zip(*batch)
         x = torch.stack(boards, dim=0)
         y = torch.tensor(values, dtype=torch.float32)
         m = torch.tensor(move_idx, dtype=torch.long)
-        return x, y, m
+        f = torch.stack(feats, dim=0).float()
+        return x, y, m, f
 
 class FisherAI(Module):
     def __init__(self, d_model=256, n_layers=4, n_heads=8, ff_mult=4, dropout=0.1):
@@ -99,29 +102,48 @@ class FisherAI(Module):
             batch_first=True
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
-        self.value_head = nn.Linear(d_model * 64, 1)
+
+        self.value_head  = nn.Linear(d_model * 64, 1)
         self.policy_head = nn.Linear(d_model, 64)
+
+        self.feature_dim = 6
+        self.feature_proj = nn.Linear(self.feature_dim, d_model)
+        self.feature_buffer = np.empty(self.feature_dim, dtype=np.float32)
 
         self.stock_fish_path = '/usr/bin/stockfish'
         self.board_buffer = np.empty(64, dtype=np.int64)
-        self.fen_buffer = np.empty(64, dtype=np.int64)
+        self.fen_buffer   = np.empty(64, dtype=np.int64)
         self.encode_buffer = np.empty(64, dtype=np.int64)
 
         self.register_buffer('pos_indices', torch.arange(64, dtype=torch.long))
 
-    def forward(self, board):
+    def encode_features(self, board):
+        fb = self.feature_buffer
+        fb[0] = 1.0 if board.turn == chess.WHITE else 0.0
+        fb[1] = 1.0 if board.has_kingside_castling_rights(chess.WHITE) else 0.0
+        fb[2] = 1.0 if board.has_queenside_castling_rights(chess.WHITE) else 0.0
+        fb[3] = 1.0 if board.has_kingside_castling_rights(chess.BLACK) else 0.0
+        fb[4] = 1.0 if board.has_queenside_castling_rights(chess.BLACK) else 0.0
+        fb[5] = 1.0 if board.ep_square is not None else 0.0
+        return fb
+
+    def forward(self, board, features):
         board_emb = self.piece_embedding(board)
 
         B, S = board.shape
         pos = self.pos_indices[:S].unsqueeze(0).expand(B, S)
         pos_emb = self.pos_embedding(pos)
 
-        x = board_emb + pos_emb
+        feat_emb = torch.tanh(self.feature_proj(features))
+        feat_emb = feat_emb.unsqueeze(1)
+
+        x = board_emb + pos_emb + feat_emb
         x = self.dropout(x)
         x = self.encoder(x)
 
         x_flat = x.reshape(B, 64 * self.d_model)
-        value = self.value_head(x_flat).squeeze(-1)
+        value  = self.value_head(x_flat).squeeze(-1)
+
         policy_per_square = self.policy_head(x)
         policy = policy_per_square.reshape(B, 64 * 64)
 
@@ -137,8 +159,7 @@ class FisherAI(Module):
             num_workers=self.dataloader_workers
         )
         self.optimizer = torch.optim.AdamW(self.parameters(), lr=1e-4, weight_decay=1e-4)
-
-        value_loss_func = nn.MSELoss()
+        value_loss_func  = nn.MSELoss()
         policy_loss_func = nn.CrossEntropyLoss()
 
         self.load_weights()
@@ -152,15 +173,16 @@ class FisherAI(Module):
             total_policy_loss = 0.0
             total_loss = 0.0
 
-            for batch_idx, (boards, values, move_idx) in enumerate(self.dataloader):
+            for batch_idx, (boards, values, move_idx, features) in enumerate(self.dataloader):
                 boards = boards.to(DEVICE, non_blocking=True)
                 values = values.to(DEVICE, non_blocking=True)
                 move_idx = move_idx.to(DEVICE, non_blocking=True)
+                features = features.to(DEVICE, non_blocking=True)
 
                 self.optimizer.zero_grad()
-                pred_value, policy_logits = self.forward(boards)
+                pred_value, policy_logits = self.forward(boards, features)
 
-                loss_value = value_loss_func(pred_value, values)
+                loss_value  = value_loss_func(pred_value, values)
                 loss_policy = policy_loss_func(policy_logits, move_idx)
                 loss = loss_value + loss_policy
 
@@ -178,8 +200,8 @@ class FisherAI(Module):
                         save_time = time.time()
                         self.save_weights()
             
-            avg_loss = total_loss / len(self.dataloader)
-            avg_value_loss = total_value_loss / len(self.dataloader)
+            avg_loss        = total_loss / len(self.dataloader)
+            avg_value_loss  = total_value_loss / len(self.dataloader)
             avg_policy_loss = total_policy_loss / len(self.dataloader)
             print(f'[+] Epoch {epoch+1}, avg loss {avg_loss:.2f}, value loss {avg_value_loss:.2f}, policy loss {avg_policy_loss:.2f}')
 
@@ -249,6 +271,7 @@ class FisherAI(Module):
 
         self.encode_board_inplace(board, self.encode_buffer)
         return torch.from_numpy(self.encode_buffer.copy()).long().unsqueeze(0)
+
     def display_board(self, array):
         array = array.reshape(8,8)
         for i in range(8):
@@ -260,7 +283,10 @@ class FisherAI(Module):
         self.encode_board_inplace(board, self.board_buffer)
         board_tensor = torch.from_numpy(self.board_buffer).long().unsqueeze(0).to(DEVICE)
 
-        value, policy_logits = self.forward(board_tensor)
+        feats_np = self.encode_features(board)
+        feats_tensor = torch.from_numpy(feats_np).unsqueeze(0).to(DEVICE)
+
+        value, policy_logits = self.forward(board_tensor, feats_tensor)
         policy_logits = policy_logits.squeeze(0)
         policy_probs = F.softmax(policy_logits, dim=-1)
 
@@ -284,7 +310,6 @@ class FisherAI(Module):
         moves, _ = self.suggest_moves(board, k)
         return moves[0] if moves else None
 
-    @torch.no_grad()
     def evaluate_position(self, board):
         if board.is_game_over():
             result = board.result()
@@ -297,9 +322,11 @@ class FisherAI(Module):
         
         self.encode_board_inplace(board, self.board_buffer)
         board_tensor = torch.from_numpy(self.board_buffer).long().unsqueeze(0).to(DEVICE)
+        feats_np = self.encode_features(board)
+        feats_tensor = torch.from_numpy(feats_np).unsqueeze(0).to(DEVICE)
 
         self.eval()
-        value, _ = self.forward(board_tensor)
+        value, _ = self.forward(board_tensor, feats_tensor)
         return float(value.item())
     
     def negamax_search(self, board, depth, alpha, beta, start_time, time_limit, k=5):

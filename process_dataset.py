@@ -33,10 +33,11 @@ def process_chunk_worker(chunk_text, lookup, worker_id, shard_size, shard_prefix
             continue
 
         n = len(moves)
-        game_array = np.ones((n, 64), dtype=np.int64)
-        turns_array = np.empty(n, dtype=np.int8)
-        moves_idx_array = np.empty(n, dtype=np.int64)
-        values_array = np.empty(n, dtype=np.float32)
+        game_array     = np.ones((n, 64), dtype=np.int64)
+        turns_array    = np.empty(n, dtype=np.int8)
+        moves_idx_array  = np.empty(n, dtype=np.int64)
+        values_array   = np.empty(n, dtype=np.float32)
+        features_array = np.empty((n, 6), dtype=np.float32)
 
         for num, move in enumerate(moves):
             game_array[num].fill(1)
@@ -44,6 +45,13 @@ def process_chunk_worker(chunk_text, lookup, worker_id, shard_size, shard_prefix
                 game_array[num, sq] = lookup[(piece.piece_type, int(piece.color))]
 
             turns_array[num] = 1 if board.turn == chess.WHITE else 0
+            features_array[num, 0] = 1.0 if board.turn == chess.WHITE else 0.0
+            features_array[num, 1] = 1.0 if board.has_kingside_castling_rights(chess.WHITE) else 0.0
+            features_array[num, 2] = 1.0 if board.has_queenside_castling_rights(chess.WHITE) else 0.0
+            features_array[num, 3] = 1.0 if board.has_kingside_castling_rights(chess.BLACK) else 0.0
+            features_array[num, 4] = 1.0 if board.has_queenside_castling_rights(chess.BLACK) else 0.0
+            features_array[num, 5] = 1.0 if board.ep_square is not None else 0.0
+
             moves_idx_array[num] = move.from_square * 64 + move.to_square
             mover_color = board.turn
             board.push(move)
@@ -58,7 +66,7 @@ def process_chunk_worker(chunk_text, lookup, worker_id, shard_size, shard_prefix
                 cp = score.cp
 
             cp = max(-1000, min(1000, cp))
-            values_array[num] = float(cp)
+            values_array[num] = float(cp) / 1000.0
 
         training_data.append(
             (
@@ -66,6 +74,7 @@ def process_chunk_worker(chunk_text, lookup, worker_id, shard_size, shard_prefix
                 torch.from_numpy(turns_array),
                 torch.from_numpy(moves_idx_array),
                 torch.from_numpy(values_array),
+                torch.from_numpy(features_array),
             )
         )
         processed_games += 1
