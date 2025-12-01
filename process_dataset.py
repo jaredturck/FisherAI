@@ -37,28 +37,29 @@ def process_chunk_worker(chunk_text, lookup, worker_id, no_pos_per_shared, shard
             continue
 
         n = len(moves)
-        game_array       = np.ones((n, 64), dtype=np.int64)
-        turns_array      = np.empty(n, dtype=np.int8)
-        values_array     = np.empty(n, dtype=np.float32)
-        features_array   = np.empty((n, 6), dtype=np.float32)
-        move_targets_arr = np.zeros((n, 64 * 64), dtype=np.float32)
+
+        game_array       = np.ones((n, 64), dtype=np.uint8)
+        turns_array      = np.empty(n, dtype=np.uint8)
+        values_array     = np.empty(n, dtype=np.float16)
+        features_array   = np.empty((n, 6), dtype=np.uint8)
+        move_targets_arr = np.zeros((n, 64 * 64), dtype=np.uint8)
 
         for num, human_move in enumerate(moves):
             game_array[num].fill(1)
             for sq, piece in board.piece_map().items():
                 game_array[num, sq] = lookup[(piece.piece_type, int(piece.color))]
 
-            turns_array[num] = 1 if board.turn == chess.WHITE else 0
-            features_array[num, 0] = 1.0 if board.turn == chess.WHITE else 0.0
-            features_array[num, 1] = 1.0 if board.has_kingside_castling_rights(chess.WHITE) else 0.0
-            features_array[num, 2] = 1.0 if board.has_queenside_castling_rights(chess.WHITE) else 0.0
-            features_array[num, 3] = 1.0 if board.has_kingside_castling_rights(chess.BLACK) else 0.0
-            features_array[num, 4] = 1.0 if board.has_queenside_castling_rights(chess.BLACK) else 0.0
-            features_array[num, 5] = 1.0 if board.ep_square is not None else 0.0
+            turns_array[num]        = 1 if board.turn == chess.WHITE else 0
+            features_array[num, 0]  = 1 if board.turn == chess.WHITE else 0
+            features_array[num, 1]  = 1 if board.has_kingside_castling_rights(chess.WHITE) else 0
+            features_array[num, 2]  = 1 if board.has_queenside_castling_rights(chess.WHITE) else 0
+            features_array[num, 3]  = 1 if board.has_kingside_castling_rights(chess.BLACK) else 0
+            features_array[num, 4]  = 1 if board.has_queenside_castling_rights(chess.BLACK) else 0
+            features_array[num, 5]  = 1 if board.ep_square is not None else 0
 
             legal_moves = list(board.legal_moves)
             if not legal_moves:
-                values_array[num] = 0.0
+                values_array[num] = np.float16(0.0)
                 continue
 
             legal_indices = []
@@ -85,14 +86,14 @@ def process_chunk_worker(chunk_text, lookup, worker_id, no_pos_per_shared, shard
                 legal_cps.append(cp)
 
             best_cp = max(legal_cps)
-            values_array[num] = best_cp / 1000.0
+            values_array[num] = np.float16(best_cp / 1000.0)
 
             threshold = best_cp - GOOD_MARGIN_CP
-            targets = np.zeros(64 * 64, dtype=np.float32)
 
+            targets = np.zeros(64 * 64, dtype=np.uint8)
             for idx, cp in zip(legal_indices, legal_cps):
                 if cp >= threshold:
-                    targets[idx] = 1.0
+                    targets[idx] = 1
 
             move_targets_arr[num] = targets
             board.push(human_move)
