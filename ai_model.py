@@ -50,21 +50,21 @@ class ChessDataset(Dataset):
             path = os.path.join(DATASET_PATH, fname)
             data = torch.load(path, map_location="cpu", weights_only=False)
 
-            for boards_tensor, turns_tensor, moves_idx_tensor, values_tensor, features_tensor in data:
-                boards_tensor = boards_tensor.long()
-                turns_tensor = turns_tensor.long()
-                moves_idx_tensor = moves_idx_tensor.long()
-                values_tensor = values_tensor.float()
-                features_tensor = features_tensor.float()
-                num_positions = boards_tensor.shape[0]
+            for boards_tensor, turns_tensor, move_targets_tensor, values_tensor, features_tensor in data:
+                boards_tensor       = boards_tensor.long()
+                turns_tensor        = turns_tensor.long()
+                move_targets_tensor = move_targets_tensor.float()
+                values_tensor       = values_tensor.float()
+                features_tensor     = features_tensor.float()
+                num_positions       = boards_tensor.shape[0]
 
                 for ply_idx in range(num_positions):
-                    board64 = boards_tensor[ply_idx]
-                    value = float(values_tensor[ply_idx].item())
-                    move_idx = int(moves_idx_tensor[ply_idx].item())
-                    feats = features_tensor[ply_idx]
+                    board64   = boards_tensor[ply_idx]
+                    value     = float(values_tensor[ply_idx].item())
+                    move_tgt  = move_targets_tensor[ply_idx]
+                    feats     = features_tensor[ply_idx]
 
-                    self.training_data.append((board64, value, move_idx, feats))
+                    self.training_data.append((board64, value, move_tgt, feats))
                     pos_count += 1
                 
                 if time.time() - start_time > 10:
@@ -74,12 +74,12 @@ class ChessDataset(Dataset):
         print(f"[+] Loaded {pos_count:,} positions")
     
     def collate_fn(self, batch):
-        boards, values, move_idx, feats = zip(*batch)
+        boards, values, move_targets, feats = zip(*batch)
         x = torch.stack(boards, dim=0)
         y = torch.tensor(values, dtype=torch.float32)
-        m = torch.tensor(move_idx, dtype=torch.long)
+        t = torch.stack(move_targets, dim=0).float()
         f = torch.stack(feats, dim=0).float()
-        return x, y, m, f
+        return x, y, t, f
 
 class FisherAI(Module):
     def __init__(self, d_model=256, n_layers=4, n_heads=8, ff_mult=4, dropout=0.1):
@@ -159,8 +159,9 @@ class FisherAI(Module):
             num_workers=self.dataloader_workers
         )
         self.optimizer = torch.optim.AdamW(self.parameters(), lr=1e-4, weight_decay=1e-4)
+
         value_loss_func  = nn.MSELoss()
-        policy_loss_func = nn.CrossEntropyLoss()
+        policy_loss_func = nn.BCEWithLogitsLoss()
 
         self.load_weights()
         start = time.time()
@@ -169,28 +170,28 @@ class FisherAI(Module):
 
         print(f'[+] Starting training on {DEVICE} for {len(self.dataset):,} positions, batch size {BATCH_SIZE}')
         for epoch in range(self.max_epochs):
-            total_value_loss = 0.0
+            total_value_loss  = 0.0
             total_policy_loss = 0.0
-            total_loss = 0.0
+            total_loss        = 0.0
 
-            for batch_idx, (boards, values, move_idx, features) in enumerate(self.dataloader):
-                boards = boards.to(DEVICE, non_blocking=True)
-                values = values.to(DEVICE, non_blocking=True)
-                move_idx = move_idx.to(DEVICE, non_blocking=True)
-                features = features.to(DEVICE, non_blocking=True)
+            for batch_idx, (boards, values, move_targets, features) in enumerate(self.dataloader):
+                boards       = boards.to(DEVICE, non_blocking=True)
+                values       = values.to(DEVICE, non_blocking=True)
+                move_targets = move_targets.to(DEVICE, non_blocking=True)
+                features     = features.to(DEVICE, non_blocking=True)
 
                 self.optimizer.zero_grad()
                 pred_value, policy_logits = self.forward(boards, features)
 
                 loss_value  = value_loss_func(pred_value, values)
-                loss_policy = policy_loss_func(policy_logits, move_idx)
+                loss_policy = policy_loss_func(policy_logits, move_targets)
                 loss = loss_value + loss_policy
 
                 loss.backward()
                 self.optimizer.step()
 
-                total_loss += loss.item()
-                total_value_loss += loss_value.item()
+                total_loss        += loss.item()
+                total_value_loss  += loss_value.item()
                 total_policy_loss += loss_policy.item()
 
                 if time.time() - start > 10:

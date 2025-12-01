@@ -5,7 +5,7 @@ import chess.engine
 
 OUTPUT_DIR = 'datasets'
 
-def process_chunk_worker(chunk_text, lookup, worker_id, shard_size, shard_prefix="training_data"):
+def process_chunk_worker(chunk_text, lookup, worker_id, no_pos_per_shared, shard_prefix="training_data"):
     ''' Worker function to process a chunk of PGN text. '''
     text_io = io.StringIO(chunk_text)
     training_data = []
@@ -17,6 +17,10 @@ def process_chunk_worker(chunk_text, lookup, worker_id, shard_size, shard_prefix
     engine = chess.engine.SimpleEngine.popen_uci(stockfish_path)
     engine.configure({'Threads': 1, 'Hash': 16})
     eval_limit = chess.engine.Limit(time=0.01)
+
+    GOOD_MARGIN_CP = 50
+    no_positions_processed = 0
+    no_pos_counter = 0
 
     while True:
         game = chess.pgn.read_game(text_io)
@@ -33,13 +37,13 @@ def process_chunk_worker(chunk_text, lookup, worker_id, shard_size, shard_prefix
             continue
 
         n = len(moves)
-        game_array     = np.ones((n, 64), dtype=np.int64)
-        turns_array    = np.empty(n, dtype=np.int8)
-        moves_idx_array  = np.empty(n, dtype=np.int64)
-        values_array   = np.empty(n, dtype=np.float32)
-        features_array = np.empty((n, 6), dtype=np.float32)
+        game_array       = np.ones((n, 64), dtype=np.int64)
+        turns_array      = np.empty(n, dtype=np.int8)
+        values_array     = np.empty(n, dtype=np.float32)
+        features_array   = np.empty((n, 6), dtype=np.float32)
+        move_targets_arr = np.zeros((n, 64 * 64), dtype=np.float32)
 
-        for num, move in enumerate(moves):
+        for num, human_move in enumerate(moves):
             game_array[num].fill(1)
             for sq, piece in board.piece_map().items():
                 game_array[num, sq] = lookup[(piece.piece_type, int(piece.color))]
@@ -52,42 +56,70 @@ def process_chunk_worker(chunk_text, lookup, worker_id, shard_size, shard_prefix
             features_array[num, 4] = 1.0 if board.has_queenside_castling_rights(chess.BLACK) else 0.0
             features_array[num, 5] = 1.0 if board.ep_square is not None else 0.0
 
-            moves_idx_array[num] = move.from_square * 64 + move.to_square
+            legal_moves = list(board.legal_moves)
+            if not legal_moves:
+                values_array[num] = 0.0
+                continue
+
+            legal_indices = []
+            legal_cps     = []
+
             mover_color = board.turn
-            board.push(move)
 
-            info = engine.analyse(board, eval_limit)
-            score = info["score"].pov(mover_color)
+            for mv in legal_moves:
+                board.push(mv)
+                info  = engine.analyse(board, eval_limit)
+                score = info["score"].pov(mover_color)
+                board.pop()
 
-            if score.is_mate():
-                mate_score = score.mate()
-                cp = 1000 * (1 if mate_score > 0 else -1)
-            else:
-                cp = score.cp
+                if score.is_mate():
+                    mate_score = score.mate()
+                    cp = 1000 * (1 if mate_score > 0 else -1)
+                else:
+                    cp = score.cp
 
-            cp = max(-1000, min(1000, cp))
-            values_array[num] = float(cp) / 1000.0
+                cp = max(-1000, min(1000, cp))
+                idx = mv.from_square * 64 + mv.to_square
+
+                legal_indices.append(idx)
+                legal_cps.append(cp)
+                no_positions_processed += 1
+                no_pos_counter += 1
+
+            best_cp = max(legal_cps)
+            values_array[num] = best_cp / 1000.0
+
+            threshold = best_cp - GOOD_MARGIN_CP
+            targets = np.zeros(64 * 64, dtype=np.float32)
+
+            for idx, cp in zip(legal_indices, legal_cps):
+                if cp >= threshold:
+                    targets[idx] = 1.0
+
+            move_targets_arr[num] = targets
+            board.push(human_move)
 
         training_data.append(
             (
                 torch.from_numpy(game_array),
                 torch.from_numpy(turns_array),
-                torch.from_numpy(moves_idx_array),
+                torch.from_numpy(move_targets_arr),
                 torch.from_numpy(values_array),
                 torch.from_numpy(features_array),
             )
         )
         processed_games += 1
 
-        if len(training_data) >= shard_size:
+        if no_pos_counter >= no_pos_per_shared:
             fname = f"{shard_prefix}_w{worker_id}_{save_file:03d}_{len(training_data)}.pt"
             torch.save(training_data, os.path.join(OUTPUT_DIR, fname))
             training_data = []
+            no_pos_counter = 0
             save_file += 1
 
         if time.time() - start > 10:
             start = time.time()
-            print(f"[worker {worker_id}] Processed {processed_games:,} games in this chunk")
+            print(f"[worker {worker_id}] Processed {no_positions_processed} in {processed_games:,} games in this chunk")
 
     if training_data:
         fname = f"{shard_prefix}_w{worker_id}_{save_file:03d}_{len(training_data)}.pt"
@@ -115,7 +147,7 @@ class PrepareDataset:
                 print(p.upper() if array[i, j, 1] == 2 else p.lower(), end=" ")
             print("")
 
-    def process_db(self, chunk_size_bytes, num_workers, shard_size):
+    def process_db(self, chunk_size_bytes, num_workers, no_pos_per_shared):
         ''' Process the compressed PGN database in chunks using multiprocessing. '''
         start_global = time.time()
         chunk_index = 0
@@ -150,7 +182,7 @@ class PrepareDataset:
 
                     p = mp.Process(
                         target=process_chunk_worker,
-                        args=(sub_text, self.lookup, worker_id, shard_size, f"training_data_chunk{chunk_index}")
+                        args=(sub_text, self.lookup, worker_id, no_pos_per_shared, f"training_data_chunk{chunk_index}")
                     )
                     p.start()
                     processes.append(p)
@@ -165,4 +197,4 @@ class PrepareDataset:
 
 if __name__ == "__main__":
     db = PrepareDataset()
-    db.process_db(chunk_size_bytes=1_000_000, num_workers=os.cpu_count(), shard_size=50_000)
+    db.process_db(chunk_size_bytes=1_000_000, num_workers=os.cpu_count(), no_pos_per_shared=50_000)
