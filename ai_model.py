@@ -25,9 +25,17 @@ class MCTSEngine:
             self.expand(root, board, policy)
         for _ in range(simulations):
             self.simulate(board.copy(stack=False), root)
+
+        self.last_simulations = simulations
+        self.last_root_children = len(root['children'])
+
         if not root['children']:
+            self.last_best_move = None
             return None
-        return max(root['children'], key=lambda child: child['visit_count'])['move']
+
+        best_move = max(root['children'], key=lambda child: child['visit_count'])['move']
+        self.last_best_move = best_move
+        return best_move
 
     def simulate(self, board, node):
         path = [node]

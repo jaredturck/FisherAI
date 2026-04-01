@@ -131,7 +131,7 @@ class ChessGUI:
 
         for square, piece in self.board.piece_map().items():
             x, y = self.square_to_screen(square)
-            image = self.pieces[piece.symbol()]
+            image = self.pieces[piece.symbol().swapcase()]
             w, h = image.get_size()
             self.screen.blit(image, (x + (self.cell_size - w) // 2, y + (self.cell_size - h) // 2))
 
@@ -141,6 +141,8 @@ class ChessGUI:
         move = self.engine.search(self.board)
         if move:
             self.board.push(move)
+            print(self.board)
+            print(f'sims={self.engine.last_simulations} root_children={self.engine.last_root_children} best_move={move}\n')
 
     def select_square(self):
         if self.board.is_game_over() or self.board.turn != chess.WHITE:
@@ -164,6 +166,7 @@ class ChessGUI:
         move = self.get_move(self.selected_square, square)
         if move:
             self.board.push(move)
+            print(self.board, '\n')
             self.selected_square = None
             self.legal_targets = set()
             self.make_engine_move()
