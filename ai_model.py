@@ -1,211 +1,172 @@
-import sys
-from torch.utils.data import Dataset
-from torch.nn import Module
-from torch.nn.utils.rnn import pad_sequence
-import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-import torch, os, time, datetime, chess
+import math
+import chess
+import torch
 
-lookup = {(1,0) : 2,(2,0) : 3,(3,0) : 4,(4,0) : 5,(5,0) : 6,(6,0) : 7,(1,1) : 8,(2,1) : 9,(3,1) : 10,(4,1) : 11,(5,1) : 12,(6,1) : 13}
-piece_lookup = {0: ' ',1: '.',2: 'p',3: 'n',4: 'b',5: 'r',6: 'q',7: 'k',8: 'P',9: 'N',10: 'B',11: 'R',12: 'Q',13: 'K'}
-rlookup = {v : k for k,v in lookup.items()}
+class MCTSEngine:
+    def __init__(self, simulations=800, c_puct=1.4):
+        self.simulations = simulations
+        self.c_puct = c_puct
+        self.policy_size = 4672
+        self.piece_values = {chess.PAWN: 100, chess.KNIGHT: 320, chess.BISHOP: 330, chess.ROOK: 500, chess.QUEEN: 900, chess.KING: 0}
+        self.direction_lookup = {(0, 1): 0, (0, -1): 1, (1, 0): 2, (-1, 0): 3, (1, 1): 4, (-1, 1): 5, (1, -1): 6, (-1, -1): 7}
+        self.knight_lookup = {(1, 2): 0, (2, 1): 1, (2, -1): 2, (1, -2): 3, (-1, -2): 4, (-2, -1): 5, (-2, 1): 6, (-1, 2): 7}
+        self.piece_planes = {
+            (chess.WHITE, chess.PAWN): 0, (chess.WHITE, chess.KNIGHT): 1, (chess.WHITE, chess.BISHOP): 2,
+            (chess.WHITE, chess.ROOK): 3, (chess.WHITE, chess.QUEEN): 4, (chess.WHITE, chess.KING): 5,
+            (chess.BLACK, chess.PAWN): 6, (chess.BLACK, chess.KNIGHT): 7, (chess.BLACK, chess.BISHOP): 8,
+            (chess.BLACK, chess.ROOK): 9, (chess.BLACK, chess.QUEEN): 10, (chess.BLACK, chess.KING): 11,
+        }
 
-DATASET_PATH = 'datasets/'
-WEIGHTS_PATH = 'weights/'
-BATCH_SIZE = 1
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+    def search(self, board, simulations=None):
+        root = {'move': None, 'prior': 1.0, 'visit_count': 0, 'value_sum': 0.0, 'mean_value': 0.0, 'children': []}
+        simulations = simulations or self.simulations
+        if not board.is_game_over():
+            policy, _ = self.evaluate(board)
+            self.expand(root, board, policy)
+        for _ in range(simulations):
+            self.simulate(board.copy(stack=False), root)
+        if not root['children']:
+            return None
+        return max(root['children'], key=lambda child: child['visit_count'])['move']
 
-class ChessDataset(Dataset):
-    def __init__(self):
-        self.training_data = []
+    def simulate(self, board, node):
+        path = [node]
+        while node['children'] and not board.is_game_over():
+            child = max(node['children'], key=lambda child: self.puct(node, child))
+            board.push(child['move'])
+            node = child
+            path.append(node)
+        if board.is_game_over():
+            outcome = board.outcome()
+            value = 0.0 if outcome.winner is None else (1.0 if outcome.winner == board.turn else -1.0)
+        else:
+            policy, value = self.evaluate(board)
+            self.expand(node, board, policy)
+        for node in reversed(path):
+            node['visit_count'] += 1
+            node['value_sum'] += value
+            node['mean_value'] = node['value_sum'] / node['visit_count']
+            value = -value
 
-    def __len__(self):
-        return len(self.training_data)
-    
-    def __getitem__(self, idx):
-        return self.training_data[idx]
-    
-    def read_data(self):
-        self.training_data = []
-        for file in os.listdir(DATASET_PATH):
-            if file.endswith('.pt'):
-                data = torch.load(os.path.join(DATASET_PATH, file), map_location='cpu', weights_only=False)
-                for game in data:
-                    g = torch.as_tensor(game, dtype=torch.long)
-                    x = g[:-1]
-                    y = g[1:]
-                    self.training_data.append((x,y))
-        
-        print(f'[+] Loaded {len(self.training_data):,} games')
-    
-    def collate_fn(self, batch):
-        x,y = zip(*batch)
-        x = pad_sequence(x, batch_first=True, padding_value=0)
-        y = pad_sequence(y, batch_first=True, padding_value=0)
-        return x,y
+    def evaluate(self, board):
+        tensor = self.board_to_tensor(board)
+        counts = tensor[:12].sum(dim=(1, 2))
+        score = 0.0
+        score += 100 * (counts[0] - counts[6]).item()
+        score += 320 * (counts[1] - counts[7]).item()
+        score += 330 * (counts[2] - counts[8]).item()
+        score += 500 * (counts[3] - counts[9]).item()
+        score += 900 * (counts[4] - counts[10]).item()
+        for square in (chess.D4, chess.E4, chess.D5, chess.E5):
+            piece = board.piece_at(square)
+            if piece:
+                score += 15 if piece.color == chess.WHITE else -15
+        if board.has_kingside_castling_rights(chess.WHITE):
+            score += 10
+        if board.has_queenside_castling_rights(chess.WHITE):
+            score += 10
+        if board.has_kingside_castling_rights(chess.BLACK):
+            score -= 10
+        if board.has_queenside_castling_rights(chess.BLACK):
+            score -= 10
+        if board.turn == chess.BLACK:
+            score = -score
+        value = math.tanh(score / 1000.0)
+        policy = torch.zeros(self.policy_size, dtype=torch.float32)
+        for move in board.legal_moves:
+            idx = self.move_to_index(board, move)
+            if idx is None:
+                continue
+            piece = board.piece_at(move.from_square)
+            prior = 1.0
+            if board.is_capture(move):
+                captured = board.piece_at(move.to_square)
+                captured_value = self.piece_values[chess.PAWN] if board.is_en_passant(move) else self.piece_values.get(captured.piece_type, 0)
+                prior += 1.0 + captured_value / 1000.0
+                prior -= self.piece_values.get(piece.piece_type, 0) / 10000.0
+            if move.promotion == chess.QUEEN:
+                prior += 5.0
+            elif move.promotion:
+                prior += 3.0
+            if board.gives_check(move):
+                prior += 1.5
+            if board.is_castling(move):
+                prior += 1.0
+            file_index = chess.square_file(move.to_square)
+            rank_index = chess.square_rank(move.to_square)
+            if 2 <= file_index <= 5 and 2 <= rank_index <= 5:
+                prior += 0.25
+            policy[idx] = prior
+        return policy, value
 
-class FisherAI(Module):
-    def __init__(self):
-        super().__init__()
-        self.d_model = 512
-        self.nheads = self.d_model // 64
-        self.dim_feedforward = self.d_model * 4
-        self.no_transformer_layers = self.d_model // 128
-        self.dropout = 0.05
-        self.dataset = ChessDataset()
-        self.optimizer = None
-        
-        self.piece_embedding = nn.Embedding(14, self.d_model, padding_idx=0)
-        self.position_embedding = nn.Embedding(64, self.d_model)
-        self.em_dropout = nn.Dropout(self.dropout)
+    def board_to_tensor(self, board):
+        tensor = torch.zeros(18, 8, 8, dtype=torch.float32)
+        for square, piece in board.piece_map().items():
+            plane = self.piece_planes[(piece.color, piece.piece_type)]
+            tensor[plane, chess.square_rank(square), chess.square_file(square)] = 1.0
+        if board.turn == chess.WHITE:
+            tensor[12].fill_(1.0)
+        if board.has_kingside_castling_rights(chess.WHITE):
+            tensor[13].fill_(1.0)
+        if board.has_queenside_castling_rights(chess.WHITE):
+            tensor[14].fill_(1.0)
+        if board.has_kingside_castling_rights(chess.BLACK):
+            tensor[15].fill_(1.0)
+        if board.has_queenside_castling_rights(chess.BLACK):
+            tensor[16].fill_(1.0)
+        if board.ep_square is not None:
+            tensor[17, chess.square_rank(board.ep_square), chess.square_file(board.ep_square)] = 1.0
+        return tensor
 
-        self.encoder_layer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(
-                d_model=self.d_model,
-                nhead=self.nheads,
-                dim_feedforward=self.dim_feedforward,
-                dropout=self.dropout,
-                batch_first=True
-            ),
-            num_layers=self.no_transformer_layers
-        )
-        self.piece_head = nn.Linear(self.d_model, 14)
+    def puct(self, parent, child):
+        return child['mean_value'] + self.c_puct * child['prior'] * math.sqrt(parent['visit_count'] + 1) / (child['visit_count'] + 1)
 
-    def forward(self, x):
+    def expand(self, node, board, policy):
+        if node['children']:
+            return
+        children = []
+        total = 0.0
+        for move in board.legal_moves:
+            idx = self.move_to_index(board, move)
+            prior = policy[idx].item() if idx is not None else 0.0
+            children.append({'move': move, 'prior': prior, 'visit_count': 0, 'value_sum': 0.0, 'mean_value': 0.0, 'children': []})
+            total += prior
+        if total <= 0:
+            total = float(len(children))
+            for child in children:
+                child['prior'] = 1.0 / total
+        else:
+            for child in children:
+                child['prior'] /= total
+        node['children'] = children
 
-        B,S = x.shape
-        pos = self.position_embedding(torch.arange(S, device=DEVICE)).unsqueeze(0).expand(B, S, -1)
+    def move_to_index(self, board, move):
+        from_file = chess.square_file(move.from_square)
+        from_rank = chess.square_rank(move.from_square)
+        to_file = chess.square_file(move.to_square)
+        to_rank = chess.square_rank(move.to_square)
+        dx = to_file - from_file
+        dy = to_rank - from_rank
+        piece = board.piece_at(move.from_square)
+        if piece is None:
+            return None
+        base = move.from_square * 73
+        if piece.piece_type == chess.PAWN and move.promotion in (chess.KNIGHT, chess.BISHOP, chess.ROOK):
+            return base + 64 + (move.promotion - 2) * 3 + dx + 1
+        step_x = 0 if dx == 0 else dx // abs(dx)
+        step_y = 0 if dy == 0 else dy // abs(dy)
+        if (dx == 0 or dy == 0 or abs(dx) == abs(dy)) and (step_x, step_y) in self.direction_lookup:
+            return base + self.direction_lookup[(step_x, step_y)] * 7 + max(abs(dx), abs(dy)) - 1
+        if (dx, dy) in self.knight_lookup:
+            return base + 56 + self.knight_lookup[(dx, dy)]
+        return None
 
-        x = self.piece_head(
-            self.encoder_layer(
-                self.em_dropout(
-                    self.piece_embedding(x) + pos
-                )
-            )
-        )
-
-        return x
-    
-    def train_model(self):
-        self.dataset.read_data()
-        self.dataloader = torch.utils.data.DataLoader(self.dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=self.dataset.collate_fn)
-
-        self.optimizer = torch.optim.AdamW(self.parameters(), lr=1e-4)
-        loss_func = nn.CrossEntropyLoss(ignore_index=0)
-        self.load_weights()
-        start = time.time()
-        save_time = time.time()
-
-        print(f'[+] Training ({DEVICE}) started, d_model={self.d_model}, nheads={self.nheads}, dim_feedforward={self.dim_feedforward}, '
-              f'layers={self.no_transformer_layers}, batch_size={BATCH_SIZE}')
-        for epoch in range(100):
-            total_loss = 0.0
-            for n, (src, tgt) in enumerate(self.dataloader):
-                B,T,S = src.shape
-                src = src.to(DEVICE).view(-1, S)
-                tgt = tgt.to(DEVICE).view(-1)
-                self.optimizer.zero_grad()
-
-                output = self.forward(src)
-                loss = loss_func(output.view(-1, 14), tgt)
-
-                loss.backward()
-                self.optimizer.step()
-                total_loss += loss.item()
-
-                if time.time() - start > 10:
-                    start = time.time()
-                    print(f'[+] Epoch {epoch+1}, batch {n+1} of {len(self.dataloader)}, loss: {loss.item():.4f}')
-
-                    if time.time() - save_time > 600:
-                        save_time = time.time()
-                        self.save_weights()
-                        print('[+] Weights saved')
-    
-            print(f'Epoch {epoch+1}, avg loss: {total_loss / len(self.dataloader):.4f}')
-        
-    def save_weights(self):
-        fname = f'weights_{datetime.datetime.now().strftime('%d-%b-%Y_%H-%M')}.pt'
-        torch.save({
-            'weights': self.state_dict(),
-            'optimizer': self.optimizer.state_dict()
-        }, os.path.join(WEIGHTS_PATH, fname))
-    
-    def load_weights(self):
-        files = [os.path.join(WEIGHTS_PATH, file) for file in os.listdir(WEIGHTS_PATH) if file.endswith('.pt')]
-        if files:
-            max_file = max(files, key=os.path.getctime)
-            weights_data = torch.load(max_file, map_location=DEVICE)
-            if 'weights' in weights_data:
-                self.load_state_dict(weights_data['weights'])
-                print(f'[+] Loaded weights from {max_file}')
-
-            if self.optimizer and 'optimizer' in weights_data:
-                self.optimizer.load_state_dict(weights_data['optimizer'])
-                print(f'[+] Loaded optimizer state from {max_file}')
-
-    def fen_to_tensor(self, fen):
+    def main(self, fen):
         board = chess.Board(fen)
-        
-        arr = np.ones(64, dtype=np.int64)
-        for sq, sequence in board.piece_map().items():
-            arr[sq] = lookup[(sequence.piece_type, int(sequence.color))]
-        arr = arr[None, :]
-        return torch.as_tensor(arr.copy())
-    
-    def encode_board(self, b):
-        arr = np.ones(64, dtype=np.int64)
-        for sq, p in b.piece_map().items():
-            arr[sq] = lookup[(p.piece_type, int(p.color))]
-        return arr
-    
-    def predict(self, array):
-        self.eval()
-        x = array.to(DEVICE)
-        with torch.no_grad():
-            logp = F.log_softmax(self.forward(x).squeeze(0), dim=-1)
-        
-        arr = x.squeeze(0).cpu().tolist()
-        board = chess.Board.empty()
-        for sq, v in enumerate(array.view(-1)):
-            if v > 1:
-                ptype, color = rlookup[int(v)]
-                board.set_piece_at(sq, chess.Piece(ptype, bool(color)))
-            
-            best_score, best_board = float('-inf'), np.array(arr, dtype=np.int64)
-            for move in board.legal_moves:
-                b2 = board.copy(stack=False)
-                b2.push(move)
-                target = self.encode_board(b2)
-
-                idx = torch.as_tensor(target, device=logp.device, dtype=torch.long).view(-1, 1)
-                score = logp.gather(1, idx).sum().item()
-
-                if score > best_score:
-                    best_score = score
-                    best_board = target
-        
-        self.display_board(best_board)
-        
-        return torch.as_tensor([best_board], dtype=torch.long)
-    
-    def display_board(self, array):
-        array = array.reshape(8,8)
-        for i in range(8):
-            print('|'.join(piece_lookup[int(array[i, j])] for j in range(8)))
+        return self.search(board)
 
 if __name__ == '__main__':
-    if len(sys.argv) > 1 and sys.argv[1] == 'train':
-        try:
-            model = FisherAI().to(DEVICE)
-            model.train_model()
-        except KeyboardInterrupt:
-            model.save_weights()
-    
-    else:
-        model = FisherAI().to(DEVICE)
-        model.load_weights()
-        while True:
-            fen = input('Enter FEN: ')
-            # model.predict(fen)
+    fen = chess.STARTING_FEN
+    engine = MCTSEngine(simulations=800, c_puct=1.4)
+    best_move = engine.main(fen)
+    print(best_move.uci() if best_move else None)
