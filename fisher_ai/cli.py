@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -9,6 +10,7 @@ import torch
 
 from fisher_ai.checkpoint import CheckpointManager
 from fisher_ai.config import FisherConfig, available_device, load_config, save_config
+from fisher_ai.distributed import DistributedSelfPlayPool
 from fisher_ai.evaluate import play_match
 from fisher_ai.mcts import MCTS, TorchEvaluator
 from fisher_ai.network import FisherNetwork
@@ -75,6 +77,23 @@ def command_init(args):
 
 def command_self_play(args):
     config = load_config(args.config)
+    actor_count = args.actors or 1
+
+    if actor_count > 1:
+        model = build_model(config)
+        manager = build_checkpoint_manager(config)
+        ensure_checkpoint(config, model, manager)
+        pool = DistributedSelfPlayPool(
+            config_path=args.config,
+            actor_count=actor_count,
+            games_per_actor=args.games_per_actor,
+            devices=args.devices,
+            checkpoint_path=args.checkpoint,
+        )
+        target_games = None if args.continuous else args.games
+        pool.run(target_games=target_games)
+        return
+
     preferred_device = args.device or config.runtime.self_play_device
     device = available_device(preferred_device)
     model, manager, step, path = load_model(config, args.checkpoint, device=device)
@@ -149,6 +168,8 @@ def command_learn(args):
     manager = build_checkpoint_manager(config)
     trainer = AlphaZeroTrainer(model, replay, config, device=device, checkpoint_manager=manager)
     trainer.load_checkpoint(args.checkpoint)
+    last_wait_status = None
+    last_wait_log = 0.0
 
     try:
         while True:
@@ -192,11 +213,17 @@ def command_learn(args):
                 return
 
             if completed == 0:
-                print(
-                    f"Waiting for self-play data: {replay.position_count:,} retained, "
-                    f"{replay.total_positions_added:,} total generated positions",
-                    flush=True,
-                )
+                wait_status = (replay.position_count, replay.total_positions_added)
+                now = time.monotonic()
+                if wait_status != last_wait_status or now - last_wait_log >= 60.0:
+                    print(
+                        f"Learner waiting: {replay.position_count:,}/"
+                        f"{config.training.warmup_positions:,} warmup positions; "
+                        f"{replay.total_positions_added:,} total generated",
+                        flush=True,
+                    )
+                    last_wait_status = wait_status
+                    last_wait_log = now
                 time.sleep(args.poll_seconds)
     finally:
         replay.close()
@@ -211,6 +238,9 @@ def command_train(args):
             games=args.games_per_cycle,
             continuous=False,
             device=None,
+            actors=1,
+            games_per_actor=None,
+            devices=None,
         )
         command_self_play(self_play_args)
 
@@ -234,17 +264,14 @@ def command_workstation(args):
     manager = build_checkpoint_manager(config)
     ensure_checkpoint(config, model, manager)
 
-    self_play_command = [
-        sys.executable,
-        "-m",
-        "fisher_ai",
-        "self-play",
-        "--config",
-        args.config,
-        "--games",
-        str(args.games_per_batch),
-        "--continuous",
-    ]
+    for name in (
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
+        os.environ[name] = "1"
+
     learn_command = [
         sys.executable,
         "-m",
@@ -255,23 +282,29 @@ def command_workstation(args):
         "--steps",
         str(args.steps_per_burst),
         "--continuous",
+        "--poll-seconds",
+        "2",
     ]
-
-    print("Starting self-play on the configured self-play GPU")
-    self_play_process = subprocess.Popen(self_play_command)
-    print("Starting learning on the configured learner GPU")
-    learn_process = subprocess.Popen(learn_command)
+    pool = DistributedSelfPlayPool(
+        config_path=args.config,
+        actor_count=args.actors,
+        games_per_actor=args.games_per_actor,
+        devices=args.devices,
+    )
+    learn_process = None
 
     try:
-        while self_play_process.poll() is None and learn_process.poll() is None:
-            time.sleep(1)
+        pool.start()
+        print("Starting continuous learning on the configured learner GPU", flush=True)
+        learn_process = subprocess.Popen(learn_command)
+        pool.monitor(external_processes=[learn_process])
     except KeyboardInterrupt:
-        print("Stopping Fisher AI workstation training")
+        print("Stopping Fisher AI workstation training", flush=True)
     finally:
-        self_play_process.terminate()
-        learn_process.terminate()
-        self_play_process.wait()
-        learn_process.wait()
+        pool.stop()
+        if learn_process is not None and learn_process.poll() is None:
+            learn_process.terminate()
+            learn_process.wait()
 
 
 def command_evaluate(args):
@@ -335,6 +368,9 @@ def build_parser():
     self_play_parser.add_argument("--games", type=int, default=64)
     self_play_parser.add_argument("--continuous", action="store_true")
     self_play_parser.add_argument("--device")
+    self_play_parser.add_argument("--actors", type=int, default=1)
+    self_play_parser.add_argument("--games-per-actor", type=int)
+    self_play_parser.add_argument("--devices", nargs="+")
     self_play_parser.set_defaults(handler=command_self_play)
 
     learn_parser = subparsers.add_parser("learn", help="train from the replay buffer")
@@ -361,7 +397,9 @@ def build_parser():
         help="run continuous dual-GPU self-play and learning",
     )
     workstation_parser.add_argument("--config", default="fisher_config.json")
-    workstation_parser.add_argument("--games-per-batch", type=int, default=64)
+    workstation_parser.add_argument("--actors", type=int)
+    workstation_parser.add_argument("--games-per-actor", type=int)
+    workstation_parser.add_argument("--devices", nargs="+")
     workstation_parser.add_argument("--steps-per-burst", type=int, default=100)
     workstation_parser.set_defaults(handler=command_workstation)
 

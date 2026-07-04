@@ -8,13 +8,19 @@ from fisher_ai.replay import GameRecord, TrainingSample
 
 
 class SelfPlaySession:
-    def __init__(self, max_game_plies, audit_resignation=False):
+    def __init__(
+        self,
+        max_game_plies,
+        checkpoint_step=0,
+        audit_resignation=False,
+    ):
         self.state = GameState(max_game_plies=max_game_plies)
         self.root = MCTSNode(state=self.state)
         self.pending_samples = []
         self.moves = []
         self.finished = False
         self.forced_result = None
+        self.checkpoint_step = int(checkpoint_step)
         self.audit_resignation = audit_resignation
         self.resignation_streak = 0
 
@@ -41,7 +47,10 @@ class SelfPlaySession:
         self.forced_result = -1 if self.state.board.turn == chess.WHITE else 1
         self.finished = True
 
-    def build_record(self, checkpoint_step=0):
+    def build_record(self, checkpoint_step=None):
+        if checkpoint_step is None:
+            checkpoint_step = self.checkpoint_step
+
         result = self.forced_result if self.forced_result is not None else self.state.final_result()
         samples = []
 
@@ -79,79 +88,96 @@ class SelfPlayRunner:
             self.resignation_consecutive_moves = training_config.resignation_consecutive_moves
             self.resignation_audit_fraction = training_config.resignation_audit_fraction
 
-    def play_games(self, game_count, checkpoint_step=0, allow_resignation=False):
-        sessions = []
-        for _ in range(game_count):
-            audit_resignation = (
-                allow_resignation and self.rng.random() < self.resignation_audit_fraction
-            )
-            sessions.append(
-                SelfPlaySession(
-                    self.search_config.max_game_plies,
-                    audit_resignation=audit_resignation,
-                )
+    def create_session(self, checkpoint_step=0, allow_resignation=False):
+        audit_resignation = (
+            allow_resignation and self.rng.random() < self.resignation_audit_fraction
+        )
+        return SelfPlaySession(
+            self.search_config.max_game_plies,
+            checkpoint_step=checkpoint_step,
+            audit_resignation=audit_resignation,
+        )
+
+    def advance_sessions(self, sessions, allow_resignation=False):
+        active_indices = [index for index, session in enumerate(sessions) if not session.finished]
+        if not active_indices:
+            return []
+
+        active = [sessions[index] for index in active_indices]
+        full_search_flags = [
+            self.rng.random() < self.search_config.full_search_fraction for _ in active
+        ]
+        simulations = [
+            self.search_config.simulations
+            if full_search
+            else self.search_config.fast_simulations
+            for full_search in full_search_flags
+        ]
+        states = [session.state for session in active]
+        roots = [session.root for session in active]
+        searched_roots = self.mcts.run(
+            states,
+            roots=roots,
+            add_noise=True,
+            simulations=simulations,
+        )
+
+        finished_indices = []
+        for session_index, session, root, full_search in zip(
+            active_indices,
+            active,
+            searched_roots,
+            full_search_flags,
+            strict=True,
+        ):
+            actions, counts = self.mcts.visit_counts(root)
+            counts_uint16 = np.clip(counts, 0, np.iinfo(np.uint16).max).astype(np.uint16)
+            session.add_search_sample(
+                actions.astype(np.uint16),
+                counts_uint16,
+                policy_weight=1.0 if full_search else 0.0,
             )
 
-        while True:
-            active = [session for session in sessions if not session.finished]
-            if not active:
-                break
+            if full_search and root.mean_value <= self.resignation_threshold:
+                session.resignation_streak += 1
+            else:
+                session.resignation_streak = 0
 
-            full_search_flags = [
-                self.rng.random() < self.search_config.full_search_fraction for _ in active
-            ]
-            simulations = [
-                self.search_config.simulations
-                if full_search
-                else self.search_config.fast_simulations
-                for full_search in full_search_flags
-            ]
-            states = [session.state for session in active]
-            roots = [session.root for session in active]
-            searched_roots = self.mcts.run(
-                states,
-                roots=roots,
-                add_noise=True,
-                simulations=simulations,
-            )
-
-            for session, root, full_search in zip(
-                active,
-                searched_roots,
-                full_search_flags,
-                strict=True,
+            if (
+                allow_resignation
+                and not session.audit_resignation
+                and session.resignation_streak >= self.resignation_consecutive_moves
             ):
-                actions, counts = self.mcts.visit_counts(root)
-                counts_uint16 = np.clip(counts, 0, np.iinfo(np.uint16).max).astype(np.uint16)
-                session.add_search_sample(
-                    actions.astype(np.uint16),
-                    counts_uint16,
-                    policy_weight=1.0 if full_search else 0.0,
-                )
+                session.resign()
+                finished_indices.append(session_index)
+                continue
 
-                if full_search and root.mean_value <= self.resignation_threshold:
-                    session.resignation_streak += 1
-                else:
-                    session.resignation_streak = 0
+            temperature = (
+                self.search_config.temperature
+                if session.state.board.ply() < self.search_config.temperature_plies
+                else self.search_config.late_temperature
+            )
+            action = self.mcts.choose_action(
+                root,
+                temperature=temperature,
+                greedy=False,
+            )
+            session.play_action(action)
+            if session.finished:
+                finished_indices.append(session_index)
 
-                if (
-                    allow_resignation
-                    and not session.audit_resignation
-                    and session.resignation_streak >= self.resignation_consecutive_moves
-                ):
-                    session.resign()
-                    continue
+        return finished_indices
 
-                temperature = (
-                    self.search_config.temperature
-                    if session.state.board.ply() < self.search_config.temperature_plies
-                    else self.search_config.late_temperature
-                )
-                action = self.mcts.choose_action(
-                    root,
-                    temperature=temperature,
-                    greedy=False,
-                )
-                session.play_action(action)
+    def play_games(self, game_count, checkpoint_step=0, allow_resignation=False):
+        sessions = [
+            self.create_session(
+                checkpoint_step=checkpoint_step,
+                allow_resignation=allow_resignation,
+            )
+            for _ in range(game_count)
+        ]
 
-        return [session.build_record(checkpoint_step) for session in sessions]
+        while any(not session.finished for session in sessions):
+            self.advance_sessions(sessions, allow_resignation=allow_resignation)
+
+        return [session.build_record() for session in sessions]

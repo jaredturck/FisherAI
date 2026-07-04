@@ -70,9 +70,23 @@ class RuntimeConfig:
         self.replay_path = values.get("replay_path", "data/replay.lmdb")
         self.checkpoint_dir = values.get("checkpoint_dir", "checkpoints")
         self.self_play_device = values.get("self_play_device", "cuda:1")
+        self.self_play_devices = values.get(
+            "self_play_devices",
+            ["cuda:0", "cuda:1"],
+        )
         self.learner_device = values.get("learner_device", "cuda:0")
         self.self_play_games_per_batch = values.get("self_play_games_per_batch", 64)
+        self.actor_processes = values.get("actor_processes", 24)
+        self.games_per_actor = values.get("games_per_actor", 6)
+        self.pin_actor_cpus = values.get("pin_actor_cpus", True)
         self.inference_batch_size = values.get("inference_batch_size", 512)
+        self.inference_batch_wait_ms = values.get("inference_batch_wait_ms", 2.0)
+        self.inference_queue_size = values.get("inference_queue_size", 64)
+        self.max_legal_actions = values.get("max_legal_actions", 256)
+        self.replay_queue_size = values.get("replay_queue_size", 256)
+        self.replay_write_batch = values.get("replay_write_batch", 16)
+        self.status_interval_seconds = values.get("status_interval_seconds", 10.0)
+        self.checkpoint_reload_seconds = values.get("checkpoint_reload_seconds", 30.0)
         self.channels_last = values.get("channels_last", True)
         self.seed = values.get("seed", 7)
 

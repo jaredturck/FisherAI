@@ -59,9 +59,23 @@
     "replay_path": "data/replay.lmdb",
     "checkpoint_dir": "checkpoints",
     "self_play_device": "cuda:1",
+    "self_play_devices": [
+      "cuda:0",
+      "cuda:1"
+    ],
     "learner_device": "cuda:0",
     "self_play_games_per_batch": 64,
+    "actor_processes": 24,
+    "games_per_actor": 6,
+    "pin_actor_cpus": true,
     "inference_batch_size": 512,
+    "inference_batch_wait_ms": 2.0,
+    "inference_queue_size": 64,
+    "max_legal_actions": 256,
+    "replay_queue_size": 256,
+    "replay_write_batch": 16,
+    "status_interval_seconds": 10.0,
+    "checkpoint_reload_seconds": 30.0,
     "channels_last": true,
     "seed": 7
   }
