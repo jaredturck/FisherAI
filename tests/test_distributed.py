@@ -1,6 +1,16 @@
+import queue
+import threading
+
+import numpy as np
+
 from fisher_ai.checkpoint import CheckpointManager
 from fisher_ai.config import FisherConfig, save_config
-from fisher_ai.distributed import DistributedSelfPlayPool
+from fisher_ai.distributed import (
+    DistributedSelfPlayPool,
+    RemoteEvaluator,
+    SelfPlayCancelled,
+    SharedInferenceMemory,
+)
 from fisher_ai.network import FisherNetwork
 from fisher_ai.replay import ReplayBuffer
 
@@ -45,7 +55,59 @@ def test_distributed_self_play_streams_completed_games(tmp_path):
     )
     pool.run(target_games=2, timeout=60)
 
+    assert all(process.exitcode == 0 for process in pool.actor_processes)
+
     replay = ReplayBuffer(config.runtime.replay_path, max_positions=100)
     assert replay.game_count >= 2
     assert replay.position_count >= 4
     replay.close()
+
+
+def test_remote_evaluator_treats_shutdown_as_cancellation():
+    shared = SharedInferenceMemory(
+        actor_count=1,
+        slots_per_actor=1,
+        max_request_batch=1,
+        max_legal_actions=4,
+    )
+    stop_event = threading.Event()
+    request_queue = queue.Queue()
+    response_queue = queue.Queue()
+    evaluator = RemoteEvaluator(
+        0,
+        request_queue,
+        response_queue,
+        shared.descriptor,
+        stop_event,
+        [0],
+        [0],
+        [0],
+    )
+    errors = []
+
+    def evaluate():
+        try:
+            evaluator.evaluate_chunk(
+                [np.zeros((119, 8, 8), dtype=np.float16)],
+                [np.asarray([0], dtype=np.uint16)],
+            )
+        except Exception as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=evaluate)
+    thread.start()
+
+    try:
+        request_queue.get(timeout=2)
+        stop_event.set()
+        evaluator.cancel_pending()
+        thread.join(timeout=2)
+
+        assert not thread.is_alive()
+        assert len(errors) == 1
+        assert isinstance(errors[0], SelfPlayCancelled)
+    finally:
+        stop_event.set()
+        evaluator.close()
+        shared.close()
+        shared.unlink()

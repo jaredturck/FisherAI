@@ -118,6 +118,10 @@ class SharedInferenceMemory:
                 pass
 
 
+class SelfPlayCancelled(Exception):
+    pass
+
+
 class PendingInference:
     def __init__(self, slot_id):
         self.slot_id = slot_id
@@ -195,7 +199,9 @@ class RemoteEvaluator:
                     return self.available_slots.get(timeout=0.5)
                 except queue.Empty:
                     continue
-        raise RuntimeError("Self-play stopped while waiting for an inference slot")
+        raise SelfPlayCancelled(
+            "Self-play stopped while waiting for an inference slot"
+        )
 
     def evaluate(self, states, legal_actions=None):
         encoded_states = [encode_state(state) for state in states]
@@ -252,13 +258,28 @@ class RemoteEvaluator:
                 self.pending[request_id] = pending
             with self.counter_lock:
                 self.outstanding_requests[self.actor_id] += 1
-            self.request_queue.put((self.actor_id, slot_id, batch_size, request_id))
+            request = (self.actor_id, slot_id, batch_size, request_id)
+            while not self.stop_event.is_set():
+                try:
+                    self.request_queue.put(request, timeout=0.5)
+                    break
+                except queue.Full:
+                    continue
+            else:
+                raise SelfPlayCancelled(
+                    "Self-play stopped before submitting an inference request"
+                )
 
             while not pending.event.wait(timeout=0.5):
                 if self.stop_event.is_set():
-                    raise RuntimeError(
+                    raise SelfPlayCancelled(
                         "Self-play inference stopped before returning a response"
                     )
+
+            if self.stop_event.is_set():
+                raise SelfPlayCancelled(
+                    "Self-play inference stopped before returning a response"
+                )
 
             if pending.error:
                 raise RuntimeError(pending.error)
@@ -291,7 +312,14 @@ class RemoteEvaluator:
                     self.outstanding_requests[self.actor_id] -= 1
             self.available_slots.put(slot_id)
 
+    def cancel_pending(self):
+        with self.pending_lock:
+            pending_requests = list(self.pending.values())
+        for pending in pending_requests:
+            pending.event.set()
+
     def close(self):
+        self.cancel_pending()
         try:
             self.response_queue.put_nowait(None)
         except queue.Full:
@@ -592,6 +620,8 @@ def play_game_thread(
             with counter_lock:
                 games_completed[actor_id] += 1
                 positions_completed[actor_id] += len(record.samples)
+    except SelfPlayCancelled:
+        return
     except Exception as error:
         error_queue.put(str(error))
         stop_event.set()
@@ -658,10 +688,12 @@ def actor_main(
             thread.start()
             threads.append(thread)
 
-        while not stop_event.is_set():
+        while True:
             try:
                 error = error_queue.get(timeout=0.5)
             except queue.Empty:
+                if stop_event.is_set():
+                    break
                 if not any(thread.is_alive() for thread in threads):
                     raise RuntimeError(
                         "All self-play game threads stopped unexpectedly"
@@ -670,6 +702,7 @@ def actor_main(
             raise RuntimeError(error)
     finally:
         stop_event.set()
+        evaluator.cancel_pending()
         for thread in threads:
             thread.join(timeout=2)
         evaluator.close()
