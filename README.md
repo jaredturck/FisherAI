@@ -47,9 +47,9 @@ Self-play uses randomized search allocation:
 
 Search remains AlphaZero-style: PUCT selection, root Dirichlet noise, visit-count policy targets, final game-result value targets, subtree reuse, and opening exploration.
 
-## Asynchronous workstation pipeline
+## Batched workstation pipeline
 
-The workstation command uses 24 independent Python actor processes. Each actor is pinned to one logical CPU on Linux and manages six concurrent game threads:
+The workstation command uses 24 independent Python actor processes. Each actor is pinned to one logical CPU on Linux and advances six self-play sessions together in one process-level loop:
 
 ```text
 24 actor processes
@@ -57,7 +57,7 @@ The workstation command uses 24 independent Python actor processes. Each actor i
     = 144 concurrent self-play games
 ```
 
-The game threads are intentionally asynchronous. While one game waits for a neural-network result, another game in the same actor continues CPU-side MCTS work. Each actor may keep eight inference requests outstanding, and each search may reserve up to twenty-four leaves using virtual loss.
+The actor collects pending leaves across all six games before submitting one combined inference request. This restores the process-level CPU parallelism of the earlier CPU-utilization design while retaining the newer global GPU queue, shared-memory transport, vectorized MCTS selection, cached encodings, replay writer, and detailed metrics.
 
 All actors feed one shared inference queue:
 
@@ -69,18 +69,24 @@ shared bounded inference queue
 RTX 3090 cuda:0    RTX 3090 cuda:1
 ```
 
-The next available inference server consumes work, so actors are not permanently assigned to one GPU. Each server gathers requests until it reaches the target batch, the maximum batch, or the short batching deadline.
+The next available inference server consumes work, so actors are not permanently assigned to one GPU. Each server gathers complete actor requests until it reaches the target batch, the maximum batch, or the short batching deadline.
 
-Default inference settings:
+Default execution settings:
 
 ```text
-Target batch:                 512 positions
-Maximum batch:                1,024 positions
-Batch wait:                   2 ms
-Request batch:                up to 32 leaves
-Outstanding requests/actor:   8
-Inference queue capacity:     4,096 requests
+Scheduler:                     batched
+Actor processes:               24
+Games per actor:               6
+Parallel leaves per game:      8
+Actor request capacity:        automatic, currently 64 positions
+Shared-memory slots per actor: 1
+Target GPU batch:              512 positions
+Maximum GPU batch:             1,024 positions
+Batch wait:                    2 ms
+Inference queue capacity:      4,096 requests
 ```
+
+`inference_request_batch_size` is a minimum. A value of zero enables automatic sizing from `games_per_actor × parallel_searches`, rounded up to a practical shared-memory boundary. Expected batched actor requests are therefore not split into serial 32-position chunks.
 
 Large tensors stay in shared memory. Queues carry only actor, slot, request, and batch identifiers. The GPU gathers only legal policy logits and returns those logits plus the scalar value.
 
@@ -89,8 +95,8 @@ Completed games are sent to a dedicated replay writer and committed to LMDB imme
 ## CPU and search optimizations
 
 - 24 independent processes bypass the Python GIL for actor work.
-- Multiple game threads per actor keep CPU work available while inference is pending.
-- Multiple shared-memory request slots prevent one request from blocking an actor.
+- Each actor advances all of its sessions together instead of creating blocking per-game Python threads.
+- One combined actor inference request carries pending leaves from multiple games.
 - One shared inference queue dynamically balances both GPUs.
 - MCTS child statistics use contiguous NumPy arrays for vectorized PUCT selection.
 - Search nodes reconstruct a selected leaf from one root-state copy instead of copying every intermediate state.
@@ -98,6 +104,9 @@ Completed games are sent to a dedicated replay writer and committed to LMDB imme
 - Root encodings are reused for training samples rather than encoded twice.
 - Pinned host buffers, FP16 inference, channels-last tensors, and GPU-side legal-policy gathering reduce transfer overhead.
 - Replay writing runs in a dedicated process with larger transactions.
+- Live timing separates actor compute, GPU-response waiting, request-queue waiting, and replay waiting.
+
+The previous per-game threaded scheduler remains available only as a benchmark comparison mode. Production training defaults to the batched scheduler.
 
 ## Installation
 
@@ -118,7 +127,7 @@ Install the PyTorch build appropriate for the local NVIDIA driver when a specifi
 python -m fisher_ai init
 ```
 
-This creates a random checkpoint and reports the model parameter count. Existing checkpoints and replay data from the previous desktop-optimized release remain compatible.
+This creates a random checkpoint and reports the model parameter count. Existing checkpoints and replay data remain compatible.
 
 ## Start dual-GPU workstation training
 
@@ -129,13 +138,15 @@ python -m fisher_ai workstation
 Committed defaults:
 
 ```text
-CPU actors:                    24
-Games per actor:               6
-Active games:                  144
-Parallel leaves per search:    24
-Self-play GPUs:                cuda:0 and cuda:1
-Learner GPU:                   cuda:0
-Inference batch target/max:    512 / 1,024
+Self-play scheduler:            batched
+CPU actors:                     24
+Games per actor:                6
+Active games:                   144
+Parallel leaves per search:     8
+Self-play GPUs:                 cuda:0 and cuda:1
+Learner GPU:                    cuda:0
+Inference batch target/max:     512 / 1,024
+Actor inference request size:   automatic
 ```
 
 Stop the complete process group with `Ctrl+C`.
@@ -151,22 +162,23 @@ python -m fisher_ai workstation \
 
 ## One-off hardware benchmark
 
-Run the benchmark once before deciding whether to adjust execution parameters:
+Run the benchmark once before selecting the final execution parameters:
 
 ```bash
 python -m fisher_ai benchmark
 ```
 
-The benchmark runs twenty-six unique sweep configurations covering:
+The benchmark runs 15 focused profiles. It directly compares the restored process-level batched scheduler against the regressed per-game threaded scheduler, then explores the plausible batched combinations:
 
-- 4, 6, 8, 10, 12, and 14 games per actor;
-- 8, 16, 24, and 32 pending leaves, including the strongest combined settings;
-- fair per-actor inference-slot counts so larger game counts are not artificially throttled;
-- target GPU batches from 256 to 1,024 and maximum batches from 512 to 2,048;
-- 0.5, 1, 2, and 4 ms batching waits;
-- 24, 28, and 32 actor processes.
+- the exact old CPU-utilization control: 24 actors, 6 games, 8 leaves;
+- the current threaded 4-game, 24-leaf configuration;
+- 4, 6, and 8 games per actor;
+- 8, 16, 24, and 32 pending leaves where useful;
+- 1 ms and 2 ms batching waits;
+- 512 and 768 target GPU batches;
+- 22 and 24 actor processes.
 
-Each sweep configuration uses five seconds of warmup and fifteen seconds of measurement. The top three sweep configurations are then rerun for thirty seconds each. The default run contains about ten and a half minutes of timed work plus process startup and cleanup.
+Each sweep configuration uses five seconds of warmup and fifteen seconds of measurement. The top three sweep configurations are then rerun for thirty seconds each.
 
 Results are written to a timestamped directory:
 
@@ -175,7 +187,7 @@ benchmarks/YYYYMMDD_HHMMSS/benchmark_results.csv
 benchmarks/YYYYMMDD_HHMMSS/benchmark_summary.md
 ```
 
-The benchmark does **not** modify `fisher_config.json`, checkpoints, or the real replay database. It uses temporary replay storage and the same checkpoint for every configuration. The CSV records the sweep and confirmation stages, actor count, inference-slot count, timings, throughput, queue pressure, and hardware utilization. The Markdown summary reports the full sweep separately from the longer confirmation runs and recommends settings from the confirmed winner.
+The benchmark does **not** modify `fisher_config.json`, checkpoints, or the real replay database. It uses temporary replay storage and the same checkpoint for every configuration. Reports include scheduler type, resolved actor request capacity, average actor request size, GPU batch size, throughput, system CPU utilization, actor work time, inference wait time, queue pressure, and GPU utilization.
 
 Useful shorter diagnostic run:
 
@@ -189,15 +201,16 @@ python -m fisher_ai benchmark \
 
 ## Live metrics
 
-The workstation reports current throughput and queue health:
+The workstation reports current throughput and where actor time is being spent:
 
 ```text
 self-play games=... replay_games=... replay_positions=... active=144
 moves/s=... games/hour=... positions/s=... evals/s=...
-batch_avg=... batch_p50=... batch_p95=... queue=... inflight=...
+request_avg=... batch_avg=... batch_p50=... batch_p95=...
+actor_compute=... inference_wait=... queue=... inflight=... replay_queue=...
 ```
 
-The most important measures are real moves per second, completed positions per second, evaluations per second, and games per hour. CPU and GPU percentages are supporting diagnostics.
+The most important measures are real moves per second, completed positions per second, evaluations per second, and games per hour. System CPU, actor compute, and inference wait are supporting diagnostics that show whether the actors or GPUs are limiting throughput.
 
 ## Individual commands
 

@@ -14,7 +14,7 @@
     "fast_simulations": 32,
     "full_search_fraction": 0.25,
     "evaluation_simulations": 256,
-    "parallel_searches": 24,
+    "parallel_searches": 8,
     "virtual_loss": 1.0,
     "c_puct": 1.5,
     "dirichlet_alpha": 0.3,
@@ -66,7 +66,8 @@
     "learner_device": "cuda:0",
     "self_play_games_per_batch": 64,
     "actor_processes": 24,
-    "games_per_actor": 4,
+    "games_per_actor": 6,
+    "self_play_scheduler": "batched",
     "pin_actor_cpus": true,
     "inference_batch_size": 512,
     "inference_batch_wait_ms": 2.0,
@@ -79,8 +80,8 @@
     "channels_last": true,
     "seed": 7,
     "inference_max_batch_size": 1024,
-    "inference_request_batch_size": 32,
-    "max_inflight_requests_per_actor": 8,
+    "inference_request_batch_size": 0,
+    "max_inflight_requests_per_actor": 1,
     "benchmark_dir": "benchmarks"
   }
 }

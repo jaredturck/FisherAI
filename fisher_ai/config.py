@@ -22,7 +22,7 @@ class SearchConfig:
         self.fast_simulations = values.get("fast_simulations", 32)
         self.full_search_fraction = values.get("full_search_fraction", 0.25)
         self.evaluation_simulations = values.get("evaluation_simulations", 256)
-        self.parallel_searches = values.get("parallel_searches", 24)
+        self.parallel_searches = values.get("parallel_searches", 8)
         self.virtual_loss = values.get("virtual_loss", 1.0)
         self.c_puct = values.get("c_puct", 1.5)
         self.dirichlet_alpha = values.get("dirichlet_alpha", 0.3)
@@ -78,13 +78,14 @@ class RuntimeConfig:
         self.self_play_games_per_batch = values.get("self_play_games_per_batch", 64)
         self.actor_processes = values.get("actor_processes", 24)
         self.games_per_actor = values.get("games_per_actor", 6)
+        self.self_play_scheduler = values.get("self_play_scheduler", "batched")
         self.pin_actor_cpus = values.get("pin_actor_cpus", True)
         self.inference_batch_size = values.get("inference_batch_size", 512)
         self.inference_max_batch_size = values.get("inference_max_batch_size", 1024)
-        self.inference_request_batch_size = values.get("inference_request_batch_size", 32)
+        self.inference_request_batch_size = values.get("inference_request_batch_size", 0)
         self.max_inflight_requests_per_actor = values.get(
             "max_inflight_requests_per_actor",
-            8,
+            1,
         )
         self.inference_batch_wait_ms = values.get("inference_batch_wait_ms", 2.0)
         self.inference_queue_size = values.get("inference_queue_size", 4096)

@@ -12,12 +12,17 @@ import numpy as np
 
 from fisher_ai.checkpoint import CheckpointManager
 from fisher_ai.config import load_config, save_config
-from fisher_ai.distributed import DistributedSelfPlayPool
+from fisher_ai.distributed import (
+    BATCHED_SCHEDULER,
+    THREADED_SCHEDULER,
+    DistributedSelfPlayPool,
+)
 
 
 @dataclass(frozen=True)
 class BenchmarkProfile:
     profile_id: str
+    scheduler: str
     actor_count: int
     games_per_actor: int
     pending_leaves: int
@@ -29,6 +34,7 @@ class BenchmarkProfile:
 
 def build_profile(
     profile_id,
+    scheduler,
     actor_count,
     games_per_actor,
     pending_leaves,
@@ -38,9 +44,13 @@ def build_profile(
     max_inflight_requests_per_actor=None,
 ):
     if max_inflight_requests_per_actor is None:
-        max_inflight_requests_per_actor = max(8, games_per_actor)
+        if scheduler == BATCHED_SCHEDULER:
+            max_inflight_requests_per_actor = 1
+        else:
+            max_inflight_requests_per_actor = max(8, games_per_actor)
     return BenchmarkProfile(
         profile_id=profile_id,
+        scheduler=scheduler,
         actor_count=actor_count,
         games_per_actor=games_per_actor,
         pending_leaves=pending_leaves,
@@ -53,71 +63,53 @@ def build_profile(
 
 def benchmark_profiles(actor_count=24):
     return [
-        build_profile("baseline", actor_count, 10, 16),
-        build_profile("games_6", actor_count, 6, 16),
-        build_profile("games_8", actor_count, 8, 16),
-        build_profile("games_12", actor_count, 12, 16),
-        build_profile("games_14", actor_count, 14, 16),
-        build_profile("leaves_8", actor_count, 10, 8),
-        build_profile("leaves_24", actor_count, 10, 24),
-        build_profile("leaves_32", actor_count, 10, 32),
-        build_profile("batch_256", actor_count, 10, 16, 256, 512),
-        build_profile("batch_768", actor_count, 10, 16, 768, 1536),
-        build_profile("batch_1024", actor_count, 10, 16, 1024, 2048),
-        build_profile("wait_1ms", actor_count, 10, 16, batch_wait_ms=1.0),
-        build_profile("wait_4ms", actor_count, 10, 16, batch_wait_ms=4.0),
+        build_profile("baseline", BATCHED_SCHEDULER, actor_count, 6, 8),
         build_profile(
-            "aggressive",
+            "threaded_current_4x24",
+            THREADED_SCHEDULER,
             actor_count,
-            14,
+            4,
             24,
-            target_batch=1024,
-            maximum_batch=2048,
-            batch_wait_ms=4.0,
         ),
-        build_profile("games_4_leaves_24", actor_count, 4, 24),
-        build_profile("recommended_6x24", actor_count, 6, 24),
-        build_profile("games_6_leaves_32", actor_count, 6, 32),
-        build_profile("games_8_leaves_24", actor_count, 8, 24),
-        build_profile("games_8_leaves_32", actor_count, 8, 32),
-        build_profile("games_12_leaves_24", actor_count, 12, 24),
-        build_profile("games_14_leaves_24", actor_count, 14, 24),
         build_profile(
-            "recommended_batch_384",
+            "threaded_old_control_6x8",
+            THREADED_SCHEDULER,
             actor_count,
             6,
-            24,
-            target_batch=384,
-            maximum_batch=512,
-            batch_wait_ms=1.0,
+            8,
         ),
+        build_profile("batched_4x8", BATCHED_SCHEDULER, actor_count, 4, 8),
+        build_profile("batched_4x16", BATCHED_SCHEDULER, actor_count, 4, 16),
+        build_profile("batched_4x24", BATCHED_SCHEDULER, actor_count, 4, 24),
+        build_profile("batched_4x32", BATCHED_SCHEDULER, actor_count, 4, 32),
+        build_profile("batched_6x16", BATCHED_SCHEDULER, actor_count, 6, 16),
+        build_profile("batched_6x24", BATCHED_SCHEDULER, actor_count, 6, 24),
+        build_profile("batched_6x32", BATCHED_SCHEDULER, actor_count, 6, 32),
+        build_profile("batched_8x16", BATCHED_SCHEDULER, actor_count, 8, 16),
+        build_profile("batched_8x24", BATCHED_SCHEDULER, actor_count, 8, 24),
         build_profile(
-            "recommended_wait_0_5ms",
-            actor_count,
-            6,
-            24,
-            batch_wait_ms=0.5,
-        ),
-        build_profile(
-            "recommended_wait_1ms",
+            "batched_6x24_wait1",
+            BATCHED_SCHEDULER,
             actor_count,
             6,
             24,
             batch_wait_ms=1.0,
         ),
         build_profile(
-            f"actors_{actor_count + 4}",
-            actor_count + 4,
+            "batched_6x24_batch768",
+            BATCHED_SCHEDULER,
+            actor_count,
             6,
             24,
-            batch_wait_ms=1.0,
+            target_batch=768,
+            maximum_batch=1024,
         ),
         build_profile(
-            f"actors_{actor_count + 8}",
-            actor_count + 8,
+            f"batched_{max(1, actor_count - 2)}actors_6x24",
+            BATCHED_SCHEDULER,
+            max(1, actor_count - 2),
             6,
             24,
-            batch_wait_ms=1.0,
         ),
     ]
 
@@ -173,10 +165,20 @@ def histogram_percentile(histogram, percentile):
     return float(len(histogram) - 1)
 
 
-def metric_delta(start, end, elapsed, queue_samples, gpu_samples, cpu_percent):
+def metric_delta(
+    start,
+    end,
+    elapsed,
+    queue_samples,
+    gpu_samples,
+    cpu_percent,
+    actor_count,
+):
     histogram = end["histogram"] - start["histogram"]
     batches = end["batches"] - start["batches"]
     evaluations = end["evaluations"] - start["evaluations"]
+    actor_evaluations = end["actor_evaluations"] - start["actor_evaluations"]
+    requests = end["inference_requests"] - start["inference_requests"]
     games = end["games"] - start["games"]
     positions = end["positions"] - start["positions"]
     plies = end["plies"] - start["plies"]
@@ -191,8 +193,10 @@ def metric_delta(start, end, elapsed, queue_samples, gpu_samples, cpu_percent):
 
     queue_depths = [sample[0] for sample in queue_samples if sample[0] >= 0]
     replay_depths = [sample[1] for sample in queue_samples if sample[1] >= 0]
+    actor_capacity_ns = max(actor_count * elapsed * 1_000_000_000, 1)
 
     return {
+        "request_capacity": end["request_capacity"],
         "elapsed_seconds": elapsed,
         "moves_per_second": plies / elapsed,
         "evaluations_per_second": evaluations / elapsed,
@@ -201,6 +205,8 @@ def metric_delta(start, end, elapsed, queue_samples, gpu_samples, cpu_percent):
         "completed_games": games,
         "completed_positions": positions,
         "evaluations": evaluations,
+        "inference_requests": requests,
+        "average_actor_request": actor_evaluations / max(requests, 1),
         "average_gpu_batch": evaluations / max(batches, 1),
         "median_gpu_batch": histogram_percentile(histogram, 0.5),
         "p95_gpu_batch": histogram_percentile(histogram, 0.95),
@@ -209,6 +215,18 @@ def metric_delta(start, end, elapsed, queue_samples, gpu_samples, cpu_percent):
         "maximum_queue_depth": max(queue_depths, default=-1),
         "average_replay_queue_depth": float(np.mean(replay_depths)) if replay_depths else -1.0,
         "cpu_utilization": cpu_percent,
+        "actor_work_percent": 100.0
+        * (end["actor_compute_ns"] - start["actor_compute_ns"])
+        / actor_capacity_ns,
+        "inference_wait_percent": 100.0
+        * (end["response_wait_ns"] - start["response_wait_ns"])
+        / actor_capacity_ns,
+        "queue_wait_percent": 100.0
+        * (end["queue_wait_ns"] - start["queue_wait_ns"])
+        / actor_capacity_ns,
+        "replay_wait_percent": 100.0
+        * (end["replay_wait_ns"] - start["replay_wait_ns"])
+        / actor_capacity_ns,
         "gpu_utilization": gpu_utilization,
         "gpu_memory_mib": gpu_memory,
         "outstanding_requests": end["outstanding_requests"],
@@ -221,6 +239,7 @@ def flatten_result(profile, metrics, run_stage="sweep", confirmation_rank=""):
         "configuration_id": profile.profile_id,
         "run_stage": run_stage,
         "confirmation_rank": confirmation_rank,
+        "scheduler": profile.scheduler,
         "actor_count": profile.actor_count,
         "games_per_actor": profile.games_per_actor,
         "pending_leaves": profile.pending_leaves,
@@ -242,25 +261,26 @@ def append_ranked_table(lines, title, ranked):
         [
             f"## {title}",
             "",
-            "| Rank | Configuration | Actors | Games | Leaves | Slots | Batch | Wait | "
-            "Moves/s | Evals/s | Avg batch | CPU | Blocked waits |",
-            "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "| Rank | Configuration | Scheduler | Actors | Games | Leaves | Request cap | "
+            "Batch | Wait | Moves/s | Evals/s | Request avg | GPU batch | CPU | "
+            "Actor work | Inference wait |",
+            "|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
     for rank, row in enumerate(ranked, start=1):
         lines.append(
-            f"| {rank} | {row['configuration_id']} | "
-            f"{row['actor_count']} | "
-            f"{row['games_per_actor']} | "
-            f"{row['pending_leaves']} | "
-            f"{row['max_inflight_requests_per_actor']} | "
+            f"| {rank} | {row['configuration_id']} | {row['scheduler']} | "
+            f"{row['actor_count']} | {row['games_per_actor']} | "
+            f"{row['pending_leaves']} | {row['request_capacity']} | "
             f"{row['target_batch']}/{row['maximum_batch']} | "
             f"{row['batch_wait_ms']:g} ms | "
             f"{row['moves_per_second']:.2f} | "
             f"{row['evaluations_per_second']:.1f} | "
+            f"{row['average_actor_request']:.1f} | "
             f"{row['average_gpu_batch']:.1f} | "
             f"{row['cpu_utilization']:.1f}% | "
-            f"{row['blocked_slot_waits']} |"
+            f"{row['actor_work_percent']:.1f}% | "
+            f"{row['inference_wait_percent']:.1f}% |"
         )
     lines.append("")
 
@@ -315,9 +335,10 @@ def write_benchmark_reports(results, output_dir, metadata):
         f"Confirmation runs: {metadata['confirmation_run_count']}",
         f"Devices: {', '.join(metadata['devices'])}",
         "",
-        "Sweep results use short measurements to cover the useful execution space. "
-        "The strongest sweep configurations are rerun for longer confirmation "
-        "measurements, and the final recommendation comes from those confirmation runs.",
+        "The sweep compares the restored process-level batched scheduler with the "
+        "threaded regression under the same inference servers. Actor work and wait "
+        "percentages are timing diagnostics; system CPU utilization and completed "
+        "moves per second remain the primary throughput evidence.",
         "",
     ]
 
@@ -341,13 +362,15 @@ def write_benchmark_reports(results, output_dir, metadata):
                 f"The highest-throughput {result_kind} result was "
                 f"`{best['configuration_id']}` at "
                 f"{best['moves_per_second']:.2f} moves/s, "
-                f"{improvement:+.1f}% relative to the benchmark baseline.",
+                f"{improvement:+.1f}% relative to the batched old-patch control.",
                 "",
                 "```json",
                 "{",
+                f"  \"self_play_scheduler\": \"{best['scheduler']}\",",
                 f"  \"actor_processes\": {best['actor_count']},",
                 f"  \"games_per_actor\": {best['games_per_actor']},",
                 f"  \"parallel_searches\": {best['pending_leaves']},",
+                "  \"inference_request_batch_size\": 0,",
                 "  \"max_inflight_requests_per_actor\": "
                 f"{best['max_inflight_requests_per_actor']},",
                 f"  \"inference_batch_size\": {best['target_batch']},",
@@ -379,8 +402,10 @@ def run_profile(
         temp_dir = Path(temp_dir)
         config = copy.deepcopy(base_config)
         config.search.parallel_searches = profile.pending_leaves
+        config.runtime.self_play_scheduler = profile.scheduler
         config.runtime.actor_processes = profile.actor_count
         config.runtime.games_per_actor = profile.games_per_actor
+        config.runtime.inference_request_batch_size = 0
         config.runtime.max_inflight_requests_per_actor = (
             profile.max_inflight_requests_per_actor
         )
@@ -398,6 +423,7 @@ def run_profile(
             games_per_actor=profile.games_per_actor,
             devices=devices,
             checkpoint_path=checkpoint_path,
+            scheduler=profile.scheduler,
         )
         try:
             pool.start()
@@ -428,6 +454,9 @@ def run_profile(
                 time.sleep(min(1.0, max(deadline - time.monotonic(), 0.0)))
 
             elapsed = time.monotonic() - start_time
+            failure = pool.process_failure()
+            if failure:
+                raise RuntimeError(failure)
             cpu_end = read_cpu_times()
             end = pool.metric_snapshot()
             metrics = metric_delta(
@@ -437,6 +466,7 @@ def run_profile(
                 queue_samples,
                 gpu_samples,
                 cpu_utilization(cpu_start, cpu_end),
+                profile.actor_count,
             )
             return flatten_result(
                 profile,
@@ -450,9 +480,9 @@ def run_profile(
 
 def print_profile(profile, prefix):
     print(
-        f"{prefix} {profile.profile_id}: actors={profile.actor_count} "
-        f"games={profile.games_per_actor} leaves={profile.pending_leaves} "
-        f"slots={profile.max_inflight_requests_per_actor} "
+        f"{prefix} {profile.profile_id}: scheduler={profile.scheduler} "
+        f"actors={profile.actor_count} games={profile.games_per_actor} "
+        f"leaves={profile.pending_leaves} "
         f"batch={profile.target_batch}/{profile.maximum_batch} "
         f"wait={profile.batch_wait_ms:g}ms",
         flush=True,
@@ -463,9 +493,11 @@ def print_result(result):
     print(
         f"  moves/s={result['moves_per_second']:.2f} "
         f"evals/s={result['evaluations_per_second']:.1f} "
+        f"request_avg={result['average_actor_request']:.1f} "
         f"avg_batch={result['average_gpu_batch']:.1f} "
         f"cpu={result['cpu_utilization']:.1f}% "
-        f"blocked={result['blocked_slot_waits']}",
+        f"actor_work={result['actor_work_percent']:.1f}% "
+        f"inference_wait={result['inference_wait_percent']:.1f}%",
         flush=True,
     )
 

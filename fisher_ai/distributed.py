@@ -16,6 +16,10 @@ from fisher_ai.network import FisherNetwork
 from fisher_ai.replay import ReplayBuffer
 from fisher_ai.self_play import SelfPlayRunner
 
+BATCHED_SCHEDULER = "batched"
+THREADED_SCHEDULER = "threaded"
+VALID_SCHEDULERS = {BATCHED_SCHEDULER, THREADED_SCHEDULER}
+
 
 class SharedInferenceMemory:
     def __init__(
@@ -122,14 +126,17 @@ class SelfPlayCancelled(Exception):
     pass
 
 
-class PendingInference:
-    def __init__(self, slot_id):
-        self.slot_id = slot_id
-        self.event = threading.Event()
-        self.error = None
+def add_counter(counter, actor_id, value, lock=None):
+    if lock is None:
+        counter[actor_id] += value
+        return
+    with lock:
+        counter[actor_id] += value
 
 
 class RemoteEvaluator:
+    """Blocking evaluator used by the process-level batched actor scheduler."""
+
     def __init__(
         self,
         actor_id,
@@ -140,6 +147,9 @@ class RemoteEvaluator:
         evaluated_positions,
         outstanding_requests,
         blocked_slot_waits,
+        inference_requests,
+        queue_wait_ns,
+        response_wait_ns,
     ):
         self.actor_id = actor_id
         self.request_queue = request_queue
@@ -149,6 +159,188 @@ class RemoteEvaluator:
         self.evaluated_positions = evaluated_positions
         self.outstanding_requests = outstanding_requests
         self.blocked_slot_waits = blocked_slot_waits
+        self.inference_requests = inference_requests
+        self.queue_wait_ns = queue_wait_ns
+        self.response_wait_ns = response_wait_ns
+        self.max_request_batch = self.shared.states.shape[2]
+        self.max_legal_actions = self.shared.legal_actions.shape[3]
+        self.request_id = 0
+        self.thread_timing = threading.local()
+
+    def reset_thread_timing(self):
+        self.thread_timing.queue_wait_ns = 0
+        self.thread_timing.response_wait_ns = 0
+
+    def thread_wait_ns(self):
+        return (
+            getattr(self.thread_timing, "queue_wait_ns", 0)
+            + getattr(self.thread_timing, "response_wait_ns", 0)
+        )
+
+    def record_queue_wait(self, elapsed):
+        self.queue_wait_ns[self.actor_id] += elapsed
+        self.thread_timing.queue_wait_ns = (
+            getattr(self.thread_timing, "queue_wait_ns", 0) + elapsed
+        )
+
+    def record_response_wait(self, elapsed):
+        self.response_wait_ns[self.actor_id] += elapsed
+        self.thread_timing.response_wait_ns = (
+            getattr(self.thread_timing, "response_wait_ns", 0) + elapsed
+        )
+
+    def evaluate(self, states, legal_actions=None):
+        encoded_states = [encode_state(state) for state in states]
+        return self.evaluate_encoded(encoded_states, legal_actions=legal_actions)
+
+    def evaluate_encoded(self, encoded_states, legal_actions=None):
+        if legal_actions is None:
+            raise ValueError("Remote inference requires legal action lists")
+
+        policies = []
+        values = []
+        for start in range(0, len(encoded_states), self.max_request_batch):
+            end = min(start + self.max_request_batch, len(encoded_states))
+            chunk_policies, chunk_values = self.evaluate_chunk(
+                encoded_states[start:end],
+                legal_actions[start:end],
+            )
+            policies.extend(chunk_policies)
+            values.append(chunk_values)
+
+        if not values:
+            return [], np.asarray([], dtype=np.float32)
+        return policies, np.concatenate(values)
+
+    def evaluate_chunk(self, encoded_states, legal_actions):
+        batch_size = len(encoded_states)
+        if batch_size == 0:
+            return [], np.asarray([], dtype=np.float32)
+
+        slot_id = 0
+        for index, (encoded_state, actions) in enumerate(
+            zip(encoded_states, legal_actions, strict=True)
+        ):
+            if len(actions) > self.max_legal_actions:
+                raise RuntimeError(
+                    f"Position has {len(actions)} legal moves, exceeding the configured "
+                    f"maximum of {self.max_legal_actions}"
+                )
+            self.shared.states[self.actor_id, slot_id, index] = encoded_state
+            length = len(actions)
+            self.shared.legal_lengths[self.actor_id, slot_id, index] = length
+            self.shared.legal_actions[
+                self.actor_id,
+                slot_id,
+                index,
+                :length,
+            ] = actions
+
+        self.request_id += 1
+        request_id = self.request_id
+        request = (self.actor_id, slot_id, batch_size, request_id)
+        self.outstanding_requests[self.actor_id] += 1
+        self.inference_requests[self.actor_id] += 1
+
+        try:
+            queue_started = time.perf_counter_ns()
+            while not self.stop_event.is_set():
+                try:
+                    self.request_queue.put(request, timeout=0.5)
+                    break
+                except queue.Full:
+                    continue
+            else:
+                raise SelfPlayCancelled(
+                    "Self-play stopped before submitting an inference request"
+                )
+            self.record_queue_wait(time.perf_counter_ns() - queue_started)
+
+            response_started = time.perf_counter_ns()
+            while not self.stop_event.is_set():
+                try:
+                    response_id, response_slot, error = self.response_queue.get(timeout=0.5)
+                    break
+                except queue.Empty:
+                    continue
+            else:
+                raise SelfPlayCancelled(
+                    "Self-play inference stopped before returning a response"
+                )
+            self.record_response_wait(time.perf_counter_ns() - response_started)
+
+            if response_id == -1 and error:
+                raise RuntimeError(error)
+            if response_id != request_id or response_slot != slot_id:
+                raise RuntimeError(
+                    f"Inference response mismatch for actor {self.actor_id}: "
+                    f"expected request {request_id} slot {slot_id}, received "
+                    f"request {response_id} slot {response_slot}"
+                )
+            if error:
+                raise RuntimeError(error)
+
+            policies = []
+            for index, actions in enumerate(legal_actions):
+                length = len(actions)
+                policies.append(
+                    self.shared.policy_logits[
+                        self.actor_id,
+                        slot_id,
+                        index,
+                        :length,
+                    ].copy()
+                )
+            values = self.shared.values[
+                self.actor_id,
+                slot_id,
+                :batch_size,
+            ].copy()
+            self.evaluated_positions[self.actor_id] += batch_size
+            return policies, values
+        finally:
+            if self.outstanding_requests[self.actor_id] > 0:
+                self.outstanding_requests[self.actor_id] -= 1
+
+    def close(self):
+        self.shared.close()
+
+
+class PendingInference:
+    def __init__(self, slot_id):
+        self.slot_id = slot_id
+        self.event = threading.Event()
+        self.error = None
+
+
+class ConcurrentRemoteEvaluator:
+    """Multi-slot evaluator retained only for threaded scheduler comparisons."""
+
+    def __init__(
+        self,
+        actor_id,
+        request_queue,
+        response_queue,
+        shared_descriptor,
+        stop_event,
+        evaluated_positions,
+        outstanding_requests,
+        blocked_slot_waits,
+        inference_requests,
+        queue_wait_ns,
+        response_wait_ns,
+    ):
+        self.actor_id = actor_id
+        self.request_queue = request_queue
+        self.response_queue = response_queue
+        self.shared = SharedInferenceMemory(descriptor=shared_descriptor)
+        self.stop_event = stop_event
+        self.evaluated_positions = evaluated_positions
+        self.outstanding_requests = outstanding_requests
+        self.blocked_slot_waits = blocked_slot_waits
+        self.inference_requests = inference_requests
+        self.queue_wait_ns = queue_wait_ns
+        self.response_wait_ns = response_wait_ns
         self.slot_count = self.shared.states.shape[1]
         self.max_request_batch = self.shared.states.shape[2]
         self.max_legal_actions = self.shared.legal_actions.shape[3]
@@ -158,6 +350,7 @@ class RemoteEvaluator:
         self.pending = {}
         self.pending_lock = threading.Lock()
         self.counter_lock = threading.Lock()
+        self.thread_timing = threading.local()
         self.request_id = 0
         self.dispatcher = threading.Thread(
             target=self.dispatch_responses,
@@ -165,6 +358,28 @@ class RemoteEvaluator:
             daemon=True,
         )
         self.dispatcher.start()
+
+    def reset_thread_timing(self):
+        self.thread_timing.queue_wait_ns = 0
+        self.thread_timing.response_wait_ns = 0
+
+    def thread_wait_ns(self):
+        return (
+            getattr(self.thread_timing, "queue_wait_ns", 0)
+            + getattr(self.thread_timing, "response_wait_ns", 0)
+        )
+
+    def record_queue_wait(self, elapsed):
+        add_counter(self.queue_wait_ns, self.actor_id, elapsed, self.counter_lock)
+        self.thread_timing.queue_wait_ns = (
+            getattr(self.thread_timing, "queue_wait_ns", 0) + elapsed
+        )
+
+    def record_response_wait(self, elapsed):
+        add_counter(self.response_wait_ns, self.actor_id, elapsed, self.counter_lock)
+        self.thread_timing.response_wait_ns = (
+            getattr(self.thread_timing, "response_wait_ns", 0) + elapsed
+        )
 
     def dispatch_responses(self):
         while not self.stop_event.is_set():
@@ -176,6 +391,14 @@ class RemoteEvaluator:
                 return
 
             request_id, slot_id, error = response
+            if request_id == -1 and error:
+                with self.pending_lock:
+                    pending_requests = list(self.pending.values())
+                for pending in pending_requests:
+                    pending.error = error
+                    pending.event.set()
+                continue
+
             with self.pending_lock:
                 pending = self.pending.get(request_id)
             if pending is None or pending.slot_id != slot_id:
@@ -192,8 +415,7 @@ class RemoteEvaluator:
         try:
             return self.available_slots.get_nowait()
         except queue.Empty:
-            with self.counter_lock:
-                self.blocked_slot_waits[self.actor_id] += 1
+            add_counter(self.blocked_slot_waits, self.actor_id, 1, self.counter_lock)
             while not self.stop_event.is_set():
                 try:
                     return self.available_slots.get(timeout=0.5)
@@ -213,7 +435,6 @@ class RemoteEvaluator:
 
         policies = []
         values = []
-
         for start in range(0, len(encoded_states), self.max_request_batch):
             end = min(start + self.max_request_batch, len(encoded_states))
             chunk_policies, chunk_values = self.evaluate_chunk(
@@ -223,6 +444,8 @@ class RemoteEvaluator:
             policies.extend(chunk_policies)
             values.append(chunk_values)
 
+        if not values:
+            return [], np.asarray([], dtype=np.float32)
         return policies, np.concatenate(values)
 
     def evaluate_chunk(self, encoded_states, legal_actions):
@@ -243,7 +466,6 @@ class RemoteEvaluator:
                         f"Position has {len(actions)} legal moves, exceeding the configured "
                         f"maximum of {self.max_legal_actions}"
                     )
-
                 self.shared.states[self.actor_id, slot_id, index] = encoded_state
                 length = len(actions)
                 self.shared.legal_lengths[self.actor_id, slot_id, index] = length
@@ -256,9 +478,21 @@ class RemoteEvaluator:
 
             with self.pending_lock:
                 self.pending[request_id] = pending
-            with self.counter_lock:
-                self.outstanding_requests[self.actor_id] += 1
+            add_counter(
+                self.outstanding_requests,
+                self.actor_id,
+                1,
+                self.counter_lock,
+            )
+            add_counter(
+                self.inference_requests,
+                self.actor_id,
+                1,
+                self.counter_lock,
+            )
+
             request = (self.actor_id, slot_id, batch_size, request_id)
+            queue_started = time.perf_counter_ns()
             while not self.stop_event.is_set():
                 try:
                     self.request_queue.put(request, timeout=0.5)
@@ -269,18 +503,20 @@ class RemoteEvaluator:
                 raise SelfPlayCancelled(
                     "Self-play stopped before submitting an inference request"
                 )
+            self.record_queue_wait(time.perf_counter_ns() - queue_started)
 
+            response_started = time.perf_counter_ns()
             while not pending.event.wait(timeout=0.5):
                 if self.stop_event.is_set():
                     raise SelfPlayCancelled(
                         "Self-play inference stopped before returning a response"
                     )
+            self.record_response_wait(time.perf_counter_ns() - response_started)
 
-            if self.stop_event.is_set():
+            if self.stop_event.is_set() and pending.error is None:
                 raise SelfPlayCancelled(
                     "Self-play inference stopped before returning a response"
                 )
-
             if pending.error:
                 raise RuntimeError(pending.error)
 
@@ -295,14 +531,17 @@ class RemoteEvaluator:
                         :length,
                     ].copy()
                 )
-
             values = self.shared.values[
                 self.actor_id,
                 slot_id,
                 :batch_size,
             ].copy()
-            with self.counter_lock:
-                self.evaluated_positions[self.actor_id] += batch_size
+            add_counter(
+                self.evaluated_positions,
+                self.actor_id,
+                batch_size,
+                self.counter_lock,
+            )
             return policies, values
         finally:
             with self.pending_lock:
@@ -433,6 +672,11 @@ def inference_server_main(
 
             requests = [request]
             state_count = request[2]
+            if state_count > maximum_batch:
+                raise RuntimeError(
+                    f"Inference request of {state_count} positions exceeds maximum GPU "
+                    f"batch size {maximum_batch}"
+                )
             deadline = time.monotonic() + batch_wait_seconds
 
             while state_count < target_batch:
@@ -458,13 +702,12 @@ def inference_server_main(
             request_offsets = []
             lengths = np.zeros(state_count, dtype=np.int64)
             max_legal_moves = 0
+            pinned_actions[:state_count].zero_()
 
             for actor_id, slot_id, batch_size, request_id in requests:
                 end = offset + batch_size
                 pinned_states[offset:end].copy_(
-                    torch.from_numpy(
-                        shared.states[actor_id, slot_id, :batch_size]
-                    )
+                    torch.from_numpy(shared.states[actor_id, slot_id, :batch_size])
                 )
                 actor_lengths = shared.legal_lengths[
                     actor_id,
@@ -485,18 +728,14 @@ def inference_server_main(
                             ].astype(np.int64, copy=False)
                         )
                     )
-                request_offsets.append(
-                    (actor_id, slot_id, request_id, offset, end)
-                )
+                request_offsets.append((actor_id, slot_id, request_id, offset, end))
                 offset = end
 
             state_tensor = pinned_states[:state_count].to(device, non_blocking=True)
             if device.type != "cuda":
                 state_tensor = state_tensor.float()
             elif config.runtime.channels_last:
-                state_tensor = state_tensor.contiguous(
-                    memory_format=torch.channels_last
-                )
+                state_tensor = state_tensor.contiguous(memory_format=torch.channels_last)
 
             action_tensor = pinned_actions[
                 :state_count,
@@ -562,6 +801,90 @@ def inference_server_main(
         shared.close()
 
 
+def put_with_stop(target_queue, value, stop_event):
+    while not stop_event.is_set():
+        try:
+            target_queue.put(value, timeout=0.5)
+            return True
+        except queue.Full:
+            continue
+    return False
+
+
+def checkpoint_step(checkpoint_steps):
+    return int(max(checkpoint_steps)) if len(checkpoint_steps) else 0
+
+
+def create_runner(actor_id, config, evaluator, seed_offset=0):
+    seed = config.runtime.seed + actor_id * 1000 + seed_offset
+    search = MCTS(evaluator, config.search, seed=seed)
+    return SelfPlayRunner(
+        search,
+        config.search,
+        training_config=config.training,
+        seed=seed,
+    )
+
+
+def run_batched_actor(
+    actor_id,
+    config,
+    evaluator,
+    game_queue,
+    stop_event,
+    games_completed,
+    positions_completed,
+    plies_completed,
+    replay_game_count,
+    checkpoint_steps,
+    games_per_actor,
+    actor_loop_ns,
+    actor_compute_ns,
+    replay_wait_ns,
+):
+    runner = create_runner(actor_id, config, evaluator)
+    sessions = [
+        runner.create_session(
+            checkpoint_step=checkpoint_step(checkpoint_steps),
+            allow_resignation=False,
+        )
+        for _ in range(games_per_actor)
+    ]
+
+    while not stop_event.is_set():
+        allow_resignation = (
+            replay_game_count.value
+            >= config.training.resignation_enabled_after_games
+        )
+        before_plies = sum(len(session.moves) for session in sessions)
+        evaluator.reset_thread_timing()
+        loop_started = time.perf_counter_ns()
+        finished_indices = runner.advance_sessions(
+            sessions,
+            allow_resignation=allow_resignation,
+        )
+        elapsed = time.perf_counter_ns() - loop_started
+        inference_wait = evaluator.thread_wait_ns()
+        actor_loop_ns[actor_id] += elapsed
+        actor_compute_ns[actor_id] += max(elapsed - inference_wait, 0)
+        after_plies = sum(len(session.moves) for session in sessions)
+        plies_completed[actor_id] += after_plies - before_plies
+
+        for index in finished_indices:
+            session = sessions[index]
+            record = session.build_record()
+            replay_started = time.perf_counter_ns()
+            if not put_with_stop(game_queue, record, stop_event):
+                return
+            replay_wait_ns[actor_id] += time.perf_counter_ns() - replay_started
+            games_completed[actor_id] += 1
+            positions_completed[actor_id] += len(record.samples)
+            sessions[index] = runner.create_session(
+                checkpoint_step=checkpoint_step(checkpoint_steps),
+                allow_resignation=allow_resignation,
+            )
+
+
 def play_game_thread(
     actor_id,
     game_id,
@@ -576,48 +899,47 @@ def play_game_thread(
     checkpoint_steps,
     counter_lock,
     error_queue,
+    actor_loop_ns,
+    actor_compute_ns,
+    replay_wait_ns,
 ):
     try:
-        search = MCTS(
-            evaluator,
-            config.search,
-            seed=config.runtime.seed + actor_id * 1000 + game_id,
-        )
-        runner = SelfPlayRunner(
-            search,
-            config.search,
-            training_config=config.training,
-            seed=config.runtime.seed + actor_id * 1000 + game_id,
-        )
-
+        runner = create_runner(actor_id, config, evaluator, seed_offset=game_id)
         while not stop_event.is_set():
             allow_resignation = (
                 replay_game_count.value
                 >= config.training.resignation_enabled_after_games
             )
-            checkpoint_step = max(checkpoint_steps) if len(checkpoint_steps) else 0
             session = runner.create_session(
-                checkpoint_step=int(checkpoint_step),
+                checkpoint_step=checkpoint_step(checkpoint_steps),
                 allow_resignation=allow_resignation,
             )
 
             while not stop_event.is_set() and not session.finished:
                 before = len(session.moves)
+                evaluator.reset_thread_timing()
+                loop_started = time.perf_counter_ns()
                 runner.advance_sessions(
                     [session],
                     allow_resignation=allow_resignation,
                 )
-                move_count = len(session.moves) - before
-                if move_count:
-                    with counter_lock:
-                        plies_completed[actor_id] += move_count
+                elapsed = time.perf_counter_ns() - loop_started
+                inference_wait = evaluator.thread_wait_ns()
+                with counter_lock:
+                    actor_loop_ns[actor_id] += elapsed
+                    actor_compute_ns[actor_id] += max(elapsed - inference_wait, 0)
+                    plies_completed[actor_id] += len(session.moves) - before
 
             if stop_event.is_set():
                 return
 
             record = session.build_record()
-            game_queue.put(record)
+            replay_started = time.perf_counter_ns()
+            if not put_with_stop(game_queue, record, stop_event):
+                return
+            replay_elapsed = time.perf_counter_ns() - replay_started
             with counter_lock:
+                replay_wait_ns[actor_id] += replay_elapsed
                 games_completed[actor_id] += 1
                 positions_completed[actor_id] += len(record.samples)
     except SelfPlayCancelled:
@@ -627,67 +949,54 @@ def play_game_thread(
         stop_event.set()
 
 
-def actor_main(
+def run_threaded_actor(
     actor_id,
-    config_path,
-    shared_descriptor,
-    request_queue,
-    response_queue,
+    config,
+    evaluator,
     game_queue,
     stop_event,
     games_completed,
     positions_completed,
     plies_completed,
-    evaluated_positions,
-    outstanding_requests,
-    blocked_slot_waits,
     replay_game_count,
     checkpoint_steps,
     games_per_actor,
+    actor_loop_ns,
+    actor_compute_ns,
+    replay_wait_ns,
 ):
-    configure_worker_threads()
-    config = load_config(config_path)
-    if config.runtime.pin_actor_cpus:
-        pin_actor_to_cpu(actor_id)
-    evaluator = RemoteEvaluator(
-        actor_id,
-        request_queue,
-        response_queue,
-        shared_descriptor,
-        stop_event,
-        evaluated_positions,
-        outstanding_requests,
-        blocked_slot_waits,
-    )
     counter_lock = threading.Lock()
     error_queue = queue.Queue()
     threads = []
 
-    try:
-        for game_id in range(games_per_actor):
-            thread = threading.Thread(
-                target=play_game_thread,
-                name=f"fisher-game-{actor_id:02d}-{game_id:02d}",
-                args=(
-                    actor_id,
-                    game_id,
-                    config,
-                    evaluator,
-                    game_queue,
-                    stop_event,
-                    games_completed,
-                    positions_completed,
-                    plies_completed,
-                    replay_game_count,
-                    checkpoint_steps,
-                    counter_lock,
-                    error_queue,
-                ),
-                daemon=True,
-            )
-            thread.start()
-            threads.append(thread)
+    for game_id in range(games_per_actor):
+        thread = threading.Thread(
+            target=play_game_thread,
+            name=f"fisher-game-{actor_id:02d}-{game_id:02d}",
+            args=(
+                actor_id,
+                game_id,
+                config,
+                evaluator,
+                game_queue,
+                stop_event,
+                games_completed,
+                positions_completed,
+                plies_completed,
+                replay_game_count,
+                checkpoint_steps,
+                counter_lock,
+                error_queue,
+                actor_loop_ns,
+                actor_compute_ns,
+                replay_wait_ns,
+            ),
+            daemon=True,
+        )
+        thread.start()
+        threads.append(thread)
 
+    try:
         while True:
             try:
                 error = error_queue.get(timeout=0.5)
@@ -701,10 +1010,99 @@ def actor_main(
                 continue
             raise RuntimeError(error)
     finally:
-        stop_event.set()
         evaluator.cancel_pending()
         for thread in threads:
             thread.join(timeout=2)
+
+
+def actor_main(
+    actor_id,
+    scheduler,
+    config_path,
+    shared_descriptor,
+    request_queue,
+    response_queue,
+    game_queue,
+    stop_event,
+    games_completed,
+    positions_completed,
+    plies_completed,
+    evaluated_positions,
+    outstanding_requests,
+    blocked_slot_waits,
+    inference_requests,
+    queue_wait_ns,
+    response_wait_ns,
+    actor_loop_ns,
+    actor_compute_ns,
+    replay_wait_ns,
+    replay_game_count,
+    checkpoint_steps,
+    games_per_actor,
+):
+    configure_worker_threads()
+    config = load_config(config_path)
+    if config.runtime.pin_actor_cpus:
+        pin_actor_to_cpu(actor_id)
+
+    evaluator_class = (
+        RemoteEvaluator if scheduler == BATCHED_SCHEDULER else ConcurrentRemoteEvaluator
+    )
+    evaluator = evaluator_class(
+        actor_id,
+        request_queue,
+        response_queue,
+        shared_descriptor,
+        stop_event,
+        evaluated_positions,
+        outstanding_requests,
+        blocked_slot_waits,
+        inference_requests,
+        queue_wait_ns,
+        response_wait_ns,
+    )
+
+    try:
+        if scheduler == BATCHED_SCHEDULER:
+            run_batched_actor(
+                actor_id,
+                config,
+                evaluator,
+                game_queue,
+                stop_event,
+                games_completed,
+                positions_completed,
+                plies_completed,
+                replay_game_count,
+                checkpoint_steps,
+                games_per_actor,
+                actor_loop_ns,
+                actor_compute_ns,
+                replay_wait_ns,
+            )
+        else:
+            run_threaded_actor(
+                actor_id,
+                config,
+                evaluator,
+                game_queue,
+                stop_event,
+                games_completed,
+                positions_completed,
+                plies_completed,
+                replay_game_count,
+                checkpoint_steps,
+                games_per_actor,
+                actor_loop_ns,
+                actor_compute_ns,
+                replay_wait_ns,
+            )
+    except SelfPlayCancelled:
+        return
+    except Exception:
+        stop_event.set()
+        raise
+    finally:
         evaluator.close()
 
 
@@ -747,6 +1145,21 @@ def replay_writer_main(
         replay.close()
 
 
+def round_request_capacity(value):
+    if value <= 32:
+        return max(1, value)
+    return ((value + 31) // 32) * 32
+
+
+def resolve_request_capacity(config, scheduler, games_per_actor):
+    configured = max(0, int(config.runtime.inference_request_batch_size))
+    if scheduler == BATCHED_SCHEDULER:
+        required = games_per_actor * config.search.parallel_searches
+    else:
+        required = config.search.parallel_searches
+    return round_request_capacity(max(configured, required))
+
+
 class DistributedSelfPlayPool:
     def __init__(
         self,
@@ -755,6 +1168,7 @@ class DistributedSelfPlayPool:
         games_per_actor=None,
         devices=None,
         checkpoint_path=None,
+        scheduler=None,
     ):
         import multiprocessing as mp
 
@@ -763,6 +1177,12 @@ class DistributedSelfPlayPool:
         self.config = load_config(self.config_path)
         self.actor_count = actor_count or self.config.runtime.actor_processes
         self.games_per_actor = games_per_actor or self.config.runtime.games_per_actor
+        self.scheduler = scheduler or self.config.runtime.self_play_scheduler
+        if self.scheduler not in VALID_SCHEDULERS:
+            raise ValueError(
+                f"Unknown self-play scheduler {self.scheduler!r}; expected one of "
+                f"{sorted(VALID_SCHEDULERS)}"
+            )
         self.config.runtime.games_per_actor = self.games_per_actor
         self.devices = devices or self.config.runtime.self_play_devices
         self.devices = [available_device(device) for device in self.devices]
@@ -770,11 +1190,31 @@ class DistributedSelfPlayPool:
         self.checkpoint_path = (
             str(Path(checkpoint_path).resolve()) if checkpoint_path else None
         )
+        self.request_capacity = resolve_request_capacity(
+            self.config,
+            self.scheduler,
+            self.games_per_actor,
+        )
+        if self.request_capacity > self.config.runtime.inference_max_batch_size:
+            raise ValueError(
+                f"Resolved actor inference request capacity {self.request_capacity} exceeds "
+                f"inference_max_batch_size={self.config.runtime.inference_max_batch_size}. "
+                "Increase the maximum GPU batch size or reduce games_per_actor or "
+                "parallel_searches."
+            )
+        self.slots_per_actor = (
+            1
+            if self.scheduler == BATCHED_SCHEDULER
+            else self.config.runtime.max_inflight_requests_per_actor
+        )
+        if self.slots_per_actor < 1:
+            raise ValueError("At least one inference slot per actor is required")
+
         self.stop_event = self.context.Event()
         self.request_queue = self.context.Queue(
             maxsize=self.config.runtime.inference_queue_size
         )
-        response_size = self.config.runtime.max_inflight_requests_per_actor * 2
+        response_size = max(2, self.slots_per_actor * 2)
         self.response_queues = [
             self.context.Queue(maxsize=response_size)
             for _ in range(self.actor_count)
@@ -784,8 +1224,8 @@ class DistributedSelfPlayPool:
         )
         self.shared = SharedInferenceMemory(
             actor_count=self.actor_count,
-            slots_per_actor=self.config.runtime.max_inflight_requests_per_actor,
-            max_request_batch=self.config.runtime.inference_request_batch_size,
+            slots_per_actor=self.slots_per_actor,
+            max_request_batch=self.request_capacity,
             max_legal_actions=self.config.runtime.max_legal_actions,
         )
         self.games_completed = self.context.Array("q", self.actor_count, lock=False)
@@ -794,6 +1234,12 @@ class DistributedSelfPlayPool:
         self.evaluated_positions = self.context.Array("q", self.actor_count, lock=False)
         self.outstanding_requests = self.context.Array("q", self.actor_count, lock=False)
         self.blocked_slot_waits = self.context.Array("q", self.actor_count, lock=False)
+        self.inference_requests = self.context.Array("q", self.actor_count, lock=False)
+        self.queue_wait_ns = self.context.Array("q", self.actor_count, lock=False)
+        self.response_wait_ns = self.context.Array("q", self.actor_count, lock=False)
+        self.actor_loop_ns = self.context.Array("q", self.actor_count, lock=False)
+        self.actor_compute_ns = self.context.Array("q", self.actor_count, lock=False)
+        self.replay_wait_ns = self.context.Array("q", self.actor_count, lock=False)
         self.inference_batches = self.context.Array("q", len(self.devices), lock=False)
         self.inference_positions = self.context.Array("q", len(self.devices), lock=False)
         self.inference_max_batches = self.context.Array("q", len(self.devices), lock=False)
@@ -885,6 +1331,7 @@ class DistributedSelfPlayPool:
                 name=f"fisher-actor-{actor_id:02d}",
                 args=(
                     actor_id,
+                    self.scheduler,
                     self.config_path,
                     self.shared.descriptor,
                     self.request_queue,
@@ -897,6 +1344,12 @@ class DistributedSelfPlayPool:
                     self.evaluated_positions,
                     self.outstanding_requests,
                     self.blocked_slot_waits,
+                    self.inference_requests,
+                    self.queue_wait_ns,
+                    self.response_wait_ns,
+                    self.actor_loop_ns,
+                    self.actor_compute_ns,
+                    self.replay_wait_ns,
                     self.replay_game_count,
                     self.checkpoint_steps,
                     self.games_per_actor,
@@ -937,10 +1390,14 @@ class DistributedSelfPlayPool:
             replay_depth = -1
 
         return {
+            "scheduler": self.scheduler,
+            "request_capacity": self.request_capacity,
             "games": int(sum(self.games_completed)),
             "positions": int(sum(self.positions_completed)),
             "plies": int(sum(self.plies_completed)),
             "evaluations": int(sum(self.inference_positions)),
+            "actor_evaluations": int(sum(self.evaluated_positions)),
+            "inference_requests": int(sum(self.inference_requests)),
             "batches": int(sum(self.inference_batches)),
             "max_batch": int(max(self.inference_max_batches, default=0)),
             "histogram": self.batch_histogram(),
@@ -951,6 +1408,11 @@ class DistributedSelfPlayPool:
             "replay_games": int(self.replay_game_count.value),
             "replay_positions": int(self.replay_position_count.value),
             "server_evaluations": [int(value) for value in self.inference_positions],
+            "queue_wait_ns": int(sum(self.queue_wait_ns)),
+            "response_wait_ns": int(sum(self.response_wait_ns)),
+            "actor_loop_ns": int(sum(self.actor_loop_ns)),
+            "actor_compute_ns": int(sum(self.actor_compute_ns)),
+            "replay_wait_ns": int(sum(self.replay_wait_ns)),
         }
 
     @staticmethod
@@ -974,8 +1436,10 @@ class DistributedSelfPlayPool:
         initial_replay_games = self.replay_game_count.value
 
         print(
-            f"Self-play pool started: {self.actor_count} actors, "
+            f"Self-play pool started: scheduler={self.scheduler}, "
+            f"{self.actor_count} actors, "
             f"{self.actor_count * self.games_per_actor} active games, "
+            f"request_capacity={self.request_capacity}, "
             f"{len(self.devices)} inference GPUs ({', '.join(self.devices)})",
             flush=True,
         )
@@ -1015,10 +1479,19 @@ class DistributedSelfPlayPool:
             ) / elapsed
             delta_batches = current["batches"] - previous["batches"]
             delta_evaluations = current["evaluations"] - previous["evaluations"]
+            delta_requests = current["inference_requests"] - previous["inference_requests"]
             average_batch = delta_evaluations / max(delta_batches, 1)
+            average_request = delta_evaluations / max(delta_requests, 1)
             histogram = current["histogram"] - previous["histogram"]
             median_batch = self.percentile_from_histogram(histogram, 0.5)
             p95_batch = self.percentile_from_histogram(histogram, 0.95)
+            capacity_ns = self.actor_count * elapsed * 1_000_000_000
+            compute_percent = 100.0 * (
+                current["actor_compute_ns"] - previous["actor_compute_ns"]
+            ) / max(capacity_ns, 1)
+            inference_wait_percent = 100.0 * (
+                current["response_wait_ns"] - previous["response_wait_ns"]
+            ) / max(capacity_ns, 1)
 
             print(
                 f"self-play games={current['games']:,} "
@@ -1027,8 +1500,11 @@ class DistributedSelfPlayPool:
                 f"active={self.actor_count * self.games_per_actor:,} "
                 f"moves/s={move_rate:.1f} games/hour={game_rate:.1f} "
                 f"positions/s={position_rate:.1f} evals/s={evaluation_rate:.1f} "
-                f"batch_avg={average_batch:.1f} batch_p50={median_batch:.0f} "
-                f"batch_p95={p95_batch:.0f} queue={current['request_queue_depth']} "
+                f"request_avg={average_request:.1f} batch_avg={average_batch:.1f} "
+                f"batch_p50={median_batch:.0f} batch_p95={p95_batch:.0f} "
+                f"actor_compute={compute_percent:.1f}% "
+                f"inference_wait={inference_wait_percent:.1f}% "
+                f"queue={current['request_queue_depth']} "
                 f"inflight={current['outstanding_requests']} "
                 f"replay_queue={current['replay_queue_depth']}",
                 flush=True,
