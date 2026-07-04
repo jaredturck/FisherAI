@@ -2,15 +2,37 @@ from collections import deque
 
 import chess
 import chess.polyglot
+import numpy as np
+
+PIECE_TYPES = (
+    chess.PAWN,
+    chess.KNIGHT,
+    chess.BISHOP,
+    chess.ROOK,
+    chess.QUEEN,
+    chess.KING,
+)
 
 
 class PositionSnapshot:
     def __init__(self, board, repetition_count):
         self.board = board.copy(stack=False)
         self.repetition_count = repetition_count
+        self.piece_planes = self.build_piece_planes(self.board)
+
+    @staticmethod
+    def build_piece_planes(board):
+        planes = np.zeros((12, 8, 8), dtype=np.uint8)
+        for color_index, color in enumerate((chess.WHITE, chess.BLACK)):
+            for piece_index, piece_type in enumerate(PIECE_TYPES):
+                for square in board.pieces(piece_type, color):
+                    row = chess.square_rank(square)
+                    col = chess.square_file(square)
+                    planes[color_index * 6 + piece_index, row, col] = 1
+        return planes
 
     def copy(self):
-        return PositionSnapshot(self.board, self.repetition_count)
+        return self
 
 
 class GameState:
@@ -37,7 +59,7 @@ class GameState:
         state.board = self.board.copy(stack=False)
         state.max_game_plies = self.max_game_plies
         state.repetition_counts = self.repetition_counts.copy()
-        state.history = deque((snapshot.copy() for snapshot in self.history), maxlen=8)
+        state.history = deque(self.history, maxlen=8)
         return state
 
     def push(self, move):
@@ -46,6 +68,10 @@ class GameState:
         count = self.repetition_counts.get(key, 0) + 1
         self.repetition_counts[key] = count
         self.history.append(PositionSnapshot(self.board, count))
+
+    def push_moves(self, moves):
+        for move in moves:
+            self.push(move)
 
     def child(self, move):
         state = self.copy()

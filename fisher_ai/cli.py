@@ -8,6 +8,7 @@ from pathlib import Path
 
 import torch
 
+from fisher_ai.benchmark import run_benchmark
 from fisher_ai.checkpoint import CheckpointManager
 from fisher_ai.config import FisherConfig, available_device, load_config, save_config
 from fisher_ai.distributed import DistributedSelfPlayPool
@@ -307,6 +308,21 @@ def command_workstation(args):
             learn_process.wait()
 
 
+def command_benchmark(args):
+    results, csv_path, markdown_path = run_benchmark(
+        config_path=args.config,
+        warmup_seconds=args.warmup_seconds,
+        measure_seconds=args.measure_seconds,
+        profile_limit=args.profiles,
+        output_dir=args.output_dir,
+        actor_count=args.actors,
+        devices=args.devices,
+    )
+    print(f"Completed {len(results)} benchmark configurations")
+    print(f"CSV: {csv_path}")
+    print(f"Summary: {markdown_path}")
+
+
 def command_evaluate(args):
     config = load_config(args.config)
     preferred_device = args.device or config.runtime.self_play_device
@@ -402,6 +418,20 @@ def build_parser():
     workstation_parser.add_argument("--devices", nargs="+")
     workstation_parser.add_argument("--steps-per-burst", type=int, default=100)
     workstation_parser.set_defaults(handler=command_workstation)
+
+
+    benchmark_parser = subparsers.add_parser(
+        "benchmark",
+        help="benchmark self-play throughput without changing training configuration",
+    )
+    benchmark_parser.add_argument("--config", default="fisher_config.json")
+    benchmark_parser.add_argument("--warmup-seconds", type=float, default=5.0)
+    benchmark_parser.add_argument("--measure-seconds", type=float, default=15.0)
+    benchmark_parser.add_argument("--profiles", type=int)
+    benchmark_parser.add_argument("--output-dir")
+    benchmark_parser.add_argument("--actors", type=int)
+    benchmark_parser.add_argument("--devices", nargs="+")
+    benchmark_parser.set_defaults(handler=command_benchmark)
 
     evaluate_parser = subparsers.add_parser("evaluate", help="play a checkpoint match")
     evaluate_parser.add_argument("--config", default="fisher_config.json")

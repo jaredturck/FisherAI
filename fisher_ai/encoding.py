@@ -55,14 +55,13 @@ def encode_state(state):
 
     for history_index, snapshot in enumerate(snapshots):
         plane_offset = start_plane + history_index * 14
-        board = snapshot.board
+        piece_planes = snapshot.piece_planes
 
-        for square, piece in board.piece_map().items():
-            square = canonical_square(square, current_color)
-            row, col = square_row_col(square)
-            piece_offset = PIECE_TYPES.index(piece.piece_type)
-            player_offset = 0 if piece.color == current_color else 6
-            planes[plane_offset + player_offset + piece_offset, row, col] = 1.0
+        if current_color == chess.WHITE:
+            planes[plane_offset : plane_offset + 12] = piece_planes
+        else:
+            planes[plane_offset : plane_offset + 6] = piece_planes[6:12, ::-1, ::-1]
+            planes[plane_offset + 6 : plane_offset + 12] = piece_planes[0:6, ::-1, ::-1]
 
         if snapshot.repetition_count >= 2:
             planes[plane_offset + 12].fill(1.0)

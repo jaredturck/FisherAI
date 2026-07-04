@@ -24,10 +24,10 @@ class SelfPlaySession:
         self.audit_resignation = audit_resignation
         self.resignation_streak = 0
 
-    def add_search_sample(self, actions, visit_counts, policy_weight):
+    def add_search_sample(self, actions, visit_counts, policy_weight, encoded_state=None):
         self.pending_samples.append(
             {
-                "state": encode_state(self.state),
+                "state": encoded_state if encoded_state is not None else encode_state(self.state),
                 "legal_actions": actions,
                 "visit_counts": visit_counts,
                 "policy_weight": policy_weight,
@@ -136,6 +136,7 @@ class SelfPlayRunner:
                 actions.astype(np.uint16),
                 counts_uint16,
                 policy_weight=1.0 if full_search else 0.0,
+                encoded_state=root.encoded_state,
             )
 
             if full_search and root.mean_value <= self.resignation_threshold:

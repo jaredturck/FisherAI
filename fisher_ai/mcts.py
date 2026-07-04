@@ -1,5 +1,3 @@
-import math
-
 import numpy as np
 import torch
 
@@ -19,13 +17,16 @@ class TorchEvaluator:
         self.model.eval()
 
     def evaluate(self, states, legal_actions=None):
+        encoded_states = [encode_state(state) for state in states]
+        return self.evaluate_encoded(encoded_states, legal_actions=legal_actions)
+
+    def evaluate_encoded(self, encoded_states, legal_actions=None):
         policy_parts = []
         value_parts = []
 
-        for start in range(0, len(states), self.inference_batch_size):
-            end = min(start + self.inference_batch_size, len(states))
-            batch_states = states[start:end]
-            array = np.stack([encode_state(state) for state in batch_states])
+        for start in range(0, len(encoded_states), self.inference_batch_size):
+            end = min(start + self.inference_batch_size, len(encoded_states))
+            array = np.stack(encoded_states[start:end]).astype(np.float32, copy=False)
             tensor = torch.from_numpy(array)
 
             if self.device.type == "cuda":
@@ -58,7 +59,8 @@ class TorchEvaluator:
                 action_tensor = action_tensor.to(self.device, non_blocking=True)
                 gathered = policy.gather(1, action_tensor).float().cpu().numpy()
                 policy_parts.extend(
-                    gathered[index, : len(actions)] for index, actions in enumerate(chunk_actions)
+                    gathered[index, : len(actions)]
+                    for index, actions in enumerate(chunk_actions)
                 )
 
             value_parts.append(value.float().cpu().numpy())
@@ -68,19 +70,28 @@ class TorchEvaluator:
 
 
 class MCTSNode:
-    def __init__(self, state=None, parent=None, move=None, prior=1.0):
+    def __init__(self, state=None, parent=None, move=None, prior=1.0, parent_index=None):
         self.state = state
         self.parent = parent
         self.move = move
+        self.parent_index = parent_index
         self.prior = prior
         self.base_prior = prior
         self.visit_count = 0
         self.value_sum = 0.0
         self.virtual_visit_count = 0
         self.children = {}
-        self.child_actions = ()
+        self.child_actions = np.asarray([], dtype=np.int64)
+        self.child_nodes = []
+        self.child_priors = np.asarray([], dtype=np.float32)
+        self.child_base_priors = np.asarray([], dtype=np.float32)
+        self.child_visits = np.asarray([], dtype=np.int32)
+        self.child_value_sums = np.asarray([], dtype=np.float32)
+        self.child_virtual_visits = np.asarray([], dtype=np.int16)
+        self.child_pending = np.asarray([], dtype=np.bool_)
         self.expanded = False
         self.pending = False
+        self.encoded_state = None
 
     @property
     def mean_value(self):
@@ -89,13 +100,29 @@ class MCTSNode:
         return self.value_sum / self.visit_count
 
     def ensure_state(self):
-        if self.state is None:
-            self.state = self.parent.state.child(self.move)
+        if self.state is not None:
+            return self.state
+
+        moves = []
+        node = self
+        while node.state is None:
+            moves.append(node.move)
+            node = node.parent
+
+        state = node.state.copy()
+        state.push_moves(reversed(moves))
+        self.state = state
         return self.state
+
+    def set_pending(self, pending):
+        self.pending = pending
+        if self.parent is not None:
+            self.parent.child_pending[self.parent_index] = pending
 
     def detach(self):
         self.parent = None
         self.move = None
+        self.parent_index = None
         return self
 
 
@@ -124,7 +151,7 @@ class MCTS:
         ]
 
         unexpanded_roots = [
-            root for root in roots if not root.expanded and not root.state.is_terminal()
+            root for root in roots if not root.expanded and not root.ensure_state().is_terminal()
         ]
         if unexpanded_roots:
             self.evaluate_and_expand(unexpanded_roots)
@@ -137,13 +164,13 @@ class MCTS:
         while any(
             root.visit_count < target
             for root, target in zip(roots, target_visits, strict=True)
-            if not root.state.is_terminal()
+            if not root.ensure_state().is_terminal()
         ):
             pending_leaves = []
             made_progress = False
 
             for root, target in zip(roots, target_visits, strict=True):
-                if root.state.is_terminal():
+                if root.ensure_state().is_terminal():
                     continue
 
                 reservations = 0
@@ -158,18 +185,19 @@ class MCTS:
                     self.reserve(leaf)
                     made_progress = True
                     reservations += 1
+                    leaf_state = leaf.ensure_state()
 
-                    if leaf.ensure_state().is_terminal():
+                    if leaf_state.is_terminal():
                         self.release(leaf)
-                        self.backup(leaf, leaf.state.terminal_value())
+                        self.backup(leaf, leaf_state.terminal_value())
                     else:
-                        leaf.pending = True
+                        leaf.set_pending(True)
                         pending_leaves.append(leaf)
 
             if pending_leaves:
                 values = self.evaluate_and_expand(pending_leaves)
                 for leaf, value in zip(pending_leaves, values, strict=True):
-                    leaf.pending = False
+                    leaf.set_pending(False)
                     self.release(leaf)
                     self.backup(leaf, float(value))
 
@@ -195,49 +223,60 @@ class MCTS:
 
     def select_leaf(self, root):
         node = root
-        while node.expanded and node.children:
+        while node.expanded and len(node.child_nodes):
             node = self.select_child(node)
             if node is None:
                 return None
-            node.ensure_state()
-            if node.state.is_terminal():
-                break
         return node
 
     def select_child(self, node):
         parent_visits = max(1, node.visit_count + node.virtual_visit_count)
-        best_score = -float("inf")
-        best_child = None
+        denominators = 1 + node.child_visits + node.child_virtual_visits
+        mean_values = np.divide(
+            node.child_value_sums,
+            node.child_visits,
+            out=np.zeros_like(node.child_value_sums),
+            where=node.child_visits > 0,
+        )
+        exploitation = -mean_values
+        exploration = (
+            self.config.c_puct
+            * node.child_priors
+            * np.sqrt(parent_visits)
+            / denominators
+        )
+        scores = (
+            exploitation
+            + exploration
+            - self.config.virtual_loss * node.child_virtual_visits
+        )
+        unavailable = node.child_pending & (node.child_visits == 0)
+        scores[unavailable] = -np.inf
 
-        for action in node.child_actions:
-            child = node.children[action]
-            if child.pending and child.visit_count == 0:
-                continue
-
-            exploitation = -child.mean_value
-            exploration = (
-                self.config.c_puct
-                * child.prior
-                * math.sqrt(parent_visits)
-                / (1 + child.visit_count + child.virtual_visit_count)
-            )
-            score = (
-                exploitation
-                + exploration
-                - self.config.virtual_loss * child.virtual_visit_count
-            )
-
-            if score > best_score:
-                best_score = score
-                best_child = child
-
-        return best_child
+        index = int(np.argmax(scores))
+        if not np.isfinite(scores[index]):
+            return None
+        return node.child_nodes[index]
 
     def evaluate_and_expand(self, nodes):
         states = [node.ensure_state() for node in nodes]
-        mappings = [legal_action_map(node.state) for node in nodes]
+        for node, state in zip(nodes, states, strict=True):
+            if node.encoded_state is None:
+                node.encoded_state = encode_state(state)
+
+        mappings = [legal_action_map(state) for state in states]
         action_lists = [np.asarray(sorted(mapping), dtype=np.int64) for mapping in mappings]
-        policy_output, values = self.evaluator.evaluate(states, legal_actions=action_lists)
+        encoded_states = [node.encoded_state for node in nodes]
+        if hasattr(self.evaluator, "evaluate_encoded"):
+            policy_output, values = self.evaluator.evaluate_encoded(
+                encoded_states,
+                legal_actions=action_lists,
+            )
+        else:
+            policy_output, values = self.evaluator.evaluate(
+                states,
+                legal_actions=action_lists,
+            )
 
         for index, node in enumerate(nodes):
             actions = action_lists[index]
@@ -250,38 +289,59 @@ class MCTS:
             priors /= priors.sum()
 
             mapping = mappings[index]
-            for action, prior in zip(actions, priors, strict=True):
+            child_nodes = []
+            for child_index, (action, prior) in enumerate(
+                zip(actions, priors, strict=True)
+            ):
                 move = mapping[int(action)]
-                node.children[int(action)] = MCTSNode(
+                child = MCTSNode(
                     parent=node,
                     move=move,
                     prior=float(prior),
+                    parent_index=child_index,
                 )
+                node.children[int(action)] = child
+                child_nodes.append(child)
 
-            node.child_actions = tuple(int(action) for action in actions)
+            node.child_actions = actions.astype(np.int64, copy=False)
+            node.child_nodes = child_nodes
+            node.child_priors = priors.astype(np.float32, copy=True)
+            node.child_base_priors = priors.astype(np.float32, copy=True)
+            child_count = len(actions)
+            node.child_visits = np.zeros(child_count, dtype=np.int32)
+            node.child_value_sums = np.zeros(child_count, dtype=np.float32)
+            node.child_virtual_visits = np.zeros(child_count, dtype=np.int16)
+            node.child_pending = np.zeros(child_count, dtype=np.bool_)
             node.expanded = True
 
         return values
 
     def set_root_priors(self, root, add_noise):
-        children = [root.children[action] for action in root.child_actions]
-        for child in children:
-            child.prior = child.base_prior
+        root.child_priors[:] = root.child_base_priors
+        for child, prior in zip(root.child_nodes, root.child_priors, strict=True):
+            child.prior = float(prior)
+            child.base_prior = float(prior)
 
-        if not add_noise or not children:
+        if not add_noise or not len(root.child_nodes):
             return
 
-        noise = self.rng.dirichlet([self.config.dirichlet_alpha for _ in children])
+        noise = self.rng.dirichlet(
+            np.full(len(root.child_nodes), self.config.dirichlet_alpha)
+        )
         fraction = self.config.dirichlet_fraction
-
-        for child, noise_value in zip(children, noise, strict=True):
-            child.prior = (1.0 - fraction) * child.base_prior + fraction * float(noise_value)
+        root.child_priors[:] = (
+            (1.0 - fraction) * root.child_base_priors + fraction * noise
+        )
+        for child, prior in zip(root.child_nodes, root.child_priors, strict=True):
+            child.prior = float(prior)
 
     @staticmethod
     def reserve(leaf):
         node = leaf
         while node is not None:
             node.virtual_visit_count += 1
+            if node.parent is not None:
+                node.parent.child_virtual_visits[node.parent_index] += 1
             node = node.parent
 
     @staticmethod
@@ -289,6 +349,8 @@ class MCTS:
         node = leaf
         while node is not None:
             node.virtual_visit_count -= 1
+            if node.parent is not None:
+                node.parent.child_virtual_visits[node.parent_index] -= 1
             node = node.parent
 
     @staticmethod
@@ -297,17 +359,15 @@ class MCTS:
         while node is not None:
             node.visit_count += 1
             node.value_sum += value
+            if node.parent is not None:
+                node.parent.child_visits[node.parent_index] += 1
+                node.parent.child_value_sums[node.parent_index] += value
             value = -value
             node = node.parent
 
     @staticmethod
     def visit_counts(root):
-        actions = np.asarray(root.child_actions, dtype=np.int64)
-        counts = np.asarray(
-            [root.children[int(action)].visit_count for action in actions],
-            dtype=np.float32,
-        )
-        return actions, counts
+        return root.child_actions.copy(), root.child_visits.astype(np.float32, copy=True)
 
     def choose_action(self, root, temperature=1.0, greedy=False):
         actions, counts = self.visit_counts(root)

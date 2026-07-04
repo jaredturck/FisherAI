@@ -22,8 +22,10 @@ def test_distributed_self_play_streams_completed_games(tmp_path):
     config.runtime.replay_path = str(tmp_path / "replay.lmdb")
     config.runtime.checkpoint_dir = str(tmp_path / "checkpoints")
     config.runtime.self_play_devices = ["cpu"]
-    config.runtime.actor_processes = 2
-    config.runtime.games_per_actor = 1
+    config.runtime.actor_processes = 1
+    config.runtime.games_per_actor = 2
+    config.runtime.max_inflight_requests_per_actor = 2
+    config.runtime.inference_request_batch_size = 2
     config.runtime.inference_batch_size = 2
     config.runtime.inference_batch_wait_ms = 1.0
     config.runtime.status_interval_seconds = 0.1
@@ -37,8 +39,8 @@ def test_distributed_self_play_streams_completed_games(tmp_path):
 
     pool = DistributedSelfPlayPool(
         config_path=config_path,
-        actor_count=2,
-        games_per_actor=1,
+        actor_count=1,
+        games_per_actor=2,
         devices=["cpu"],
     )
     pool.run(target_games=2, timeout=60)
