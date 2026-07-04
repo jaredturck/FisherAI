@@ -313,12 +313,19 @@ def command_benchmark(args):
         config_path=args.config,
         warmup_seconds=args.warmup_seconds,
         measure_seconds=args.measure_seconds,
+        confirmation_seconds=args.confirmation_seconds,
+        confirm_top=args.confirm_top,
         profile_limit=args.profiles,
         output_dir=args.output_dir,
         actor_count=args.actors,
         devices=args.devices,
     )
-    print(f"Completed {len(results)} benchmark configurations")
+    sweep_count = sum(result["run_stage"] == "sweep" for result in results)
+    confirmation_count = len(results) - sweep_count
+    print(
+        f"Completed {sweep_count} sweep configurations and "
+        f"{confirmation_count} confirmation runs"
+    )
     print(f"CSV: {csv_path}")
     print(f"Summary: {markdown_path}")
 
@@ -427,6 +434,8 @@ def build_parser():
     benchmark_parser.add_argument("--config", default="fisher_config.json")
     benchmark_parser.add_argument("--warmup-seconds", type=float, default=5.0)
     benchmark_parser.add_argument("--measure-seconds", type=float, default=15.0)
+    benchmark_parser.add_argument("--confirmation-seconds", type=float, default=30.0)
+    benchmark_parser.add_argument("--confirm-top", type=int, default=3)
     benchmark_parser.add_argument("--profiles", type=int)
     benchmark_parser.add_argument("--output-dir")
     benchmark_parser.add_argument("--actors", type=int)

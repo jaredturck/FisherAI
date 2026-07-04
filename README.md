@@ -49,15 +49,15 @@ Search remains AlphaZero-style: PUCT selection, root Dirichlet noise, visit-coun
 
 ## Asynchronous workstation pipeline
 
-The workstation command uses 24 independent Python actor processes. Each actor is pinned to one logical CPU on Linux and manages ten concurrent game threads:
+The workstation command uses 24 independent Python actor processes. Each actor is pinned to one logical CPU on Linux and manages six concurrent game threads:
 
 ```text
 24 actor processes
-    × 10 active games each
-    = 240 concurrent self-play games
+    × 6 active games each
+    = 144 concurrent self-play games
 ```
 
-The game threads are intentionally asynchronous. While one game waits for a neural-network result, another game in the same actor continues CPU-side MCTS work. Each actor may keep eight inference requests outstanding, and each search may reserve up to sixteen leaves using virtual loss.
+The game threads are intentionally asynchronous. While one game waits for a neural-network result, another game in the same actor continues CPU-side MCTS work. Each actor may keep eight inference requests outstanding, and each search may reserve up to twenty-four leaves using virtual loss.
 
 All actors feed one shared inference queue:
 
@@ -130,9 +130,9 @@ Committed defaults:
 
 ```text
 CPU actors:                    24
-Games per actor:               10
-Active games:                  240
-Parallel leaves per search:    16
+Games per actor:               6
+Active games:                  144
+Parallel leaves per search:    24
 Self-play GPUs:                cuda:0 and cuda:1
 Learner GPU:                   cuda:0
 Inference batch target/max:    512 / 1,024
@@ -145,7 +145,7 @@ Override the actor layout when diagnosing:
 ```bash
 python -m fisher_ai workstation \
     --actors 24 \
-    --games-per-actor 10 \
+    --games-per-actor 6 \
     --devices cuda:0 cuda:1
 ```
 
@@ -157,15 +157,16 @@ Run the benchmark once before deciding whether to adjust execution parameters:
 python -m fisher_ai benchmark
 ```
 
-The benchmark tests fourteen curated configurations covering:
+The benchmark runs twenty-six unique sweep configurations covering:
 
-- 6, 8, 10, 12, and 14 games per actor;
-- 8, 16, 24, and 32 pending leaves;
-- target GPU batches from 256 to 1,024;
-- maximum GPU batches from 512 to 2,048;
-- 1, 2, and 4 ms batching waits.
+- 4, 6, 8, 10, 12, and 14 games per actor;
+- 8, 16, 24, and 32 pending leaves, including the strongest combined settings;
+- fair per-actor inference-slot counts so larger game counts are not artificially throttled;
+- target GPU batches from 256 to 1,024 and maximum batches from 512 to 2,048;
+- 0.5, 1, 2, and 4 ms batching waits;
+- 24, 28, and 32 actor processes.
 
-Each configuration uses five seconds of warmup and fifteen seconds of measurement. Process startup makes the normal run roughly seven to ten minutes on the target workstation.
+Each sweep configuration uses five seconds of warmup and fifteen seconds of measurement. The top three sweep configurations are then rerun for thirty seconds each. The default run contains about ten and a half minutes of timed work plus process startup and cleanup.
 
 Results are written to a timestamped directory:
 
@@ -174,7 +175,7 @@ benchmarks/YYYYMMDD_HHMMSS/benchmark_results.csv
 benchmarks/YYYYMMDD_HHMMSS/benchmark_summary.md
 ```
 
-The benchmark does **not** modify `fisher_config.json`, checkpoints, or the real replay database. It uses temporary replay storage and the same checkpoint for every configuration.
+The benchmark does **not** modify `fisher_config.json`, checkpoints, or the real replay database. It uses temporary replay storage and the same checkpoint for every configuration. The CSV records the sweep and confirmation stages, actor count, inference-slot count, timings, throughput, queue pressure, and hardware utilization. The Markdown summary reports the full sweep separately from the longer confirmation runs and recommends settings from the confirmed winner.
 
 Useful shorter diagnostic run:
 
@@ -182,7 +183,8 @@ Useful shorter diagnostic run:
 python -m fisher_ai benchmark \
     --profiles 3 \
     --warmup-seconds 2 \
-    --measure-seconds 5
+    --measure-seconds 5 \
+    --confirm-top 0
 ```
 
 ## Live metrics
@@ -190,7 +192,7 @@ python -m fisher_ai benchmark \
 The workstation reports current throughput and queue health:
 
 ```text
-self-play games=... replay_games=... replay_positions=... active=240
+self-play games=... replay_games=... replay_positions=... active=144
 moves/s=... games/hour=... positions/s=... evals/s=...
 batch_avg=... batch_p50=... batch_p95=... queue=... inflight=...
 ```
@@ -204,7 +206,7 @@ Distributed self-play without the learner:
 ```bash
 python -m fisher_ai self-play \
     --actors 24 \
-    --games-per-actor 10 \
+    --games-per-actor 6 \
     --devices cuda:0 cuda:1 \
     --games 1000
 ```

@@ -18,30 +18,107 @@ from fisher_ai.distributed import DistributedSelfPlayPool
 @dataclass(frozen=True)
 class BenchmarkProfile:
     profile_id: str
+    actor_count: int
     games_per_actor: int
     pending_leaves: int
+    max_inflight_requests_per_actor: int
     target_batch: int
     maximum_batch: int
     batch_wait_ms: float
 
 
-def benchmark_profiles():
-    baseline = BenchmarkProfile("baseline", 10, 16, 512, 1024, 2.0)
+def build_profile(
+    profile_id,
+    actor_count,
+    games_per_actor,
+    pending_leaves,
+    target_batch=512,
+    maximum_batch=1024,
+    batch_wait_ms=2.0,
+    max_inflight_requests_per_actor=None,
+):
+    if max_inflight_requests_per_actor is None:
+        max_inflight_requests_per_actor = max(8, games_per_actor)
+    return BenchmarkProfile(
+        profile_id=profile_id,
+        actor_count=actor_count,
+        games_per_actor=games_per_actor,
+        pending_leaves=pending_leaves,
+        max_inflight_requests_per_actor=max_inflight_requests_per_actor,
+        target_batch=target_batch,
+        maximum_batch=maximum_batch,
+        batch_wait_ms=batch_wait_ms,
+    )
+
+
+def benchmark_profiles(actor_count=24):
     return [
-        baseline,
-        BenchmarkProfile("games_6", 6, 16, 512, 1024, 2.0),
-        BenchmarkProfile("games_8", 8, 16, 512, 1024, 2.0),
-        BenchmarkProfile("games_12", 12, 16, 512, 1024, 2.0),
-        BenchmarkProfile("games_14", 14, 16, 512, 1024, 2.0),
-        BenchmarkProfile("leaves_8", 10, 8, 512, 1024, 2.0),
-        BenchmarkProfile("leaves_24", 10, 24, 512, 1024, 2.0),
-        BenchmarkProfile("leaves_32", 10, 32, 512, 1024, 2.0),
-        BenchmarkProfile("batch_256", 10, 16, 256, 512, 2.0),
-        BenchmarkProfile("batch_768", 10, 16, 768, 1536, 2.0),
-        BenchmarkProfile("batch_1024", 10, 16, 1024, 2048, 2.0),
-        BenchmarkProfile("wait_1ms", 10, 16, 512, 1024, 1.0),
-        BenchmarkProfile("wait_4ms", 10, 16, 512, 1024, 4.0),
-        BenchmarkProfile("aggressive", 14, 24, 1024, 2048, 4.0),
+        build_profile("baseline", actor_count, 10, 16),
+        build_profile("games_6", actor_count, 6, 16),
+        build_profile("games_8", actor_count, 8, 16),
+        build_profile("games_12", actor_count, 12, 16),
+        build_profile("games_14", actor_count, 14, 16),
+        build_profile("leaves_8", actor_count, 10, 8),
+        build_profile("leaves_24", actor_count, 10, 24),
+        build_profile("leaves_32", actor_count, 10, 32),
+        build_profile("batch_256", actor_count, 10, 16, 256, 512),
+        build_profile("batch_768", actor_count, 10, 16, 768, 1536),
+        build_profile("batch_1024", actor_count, 10, 16, 1024, 2048),
+        build_profile("wait_1ms", actor_count, 10, 16, batch_wait_ms=1.0),
+        build_profile("wait_4ms", actor_count, 10, 16, batch_wait_ms=4.0),
+        build_profile(
+            "aggressive",
+            actor_count,
+            14,
+            24,
+            target_batch=1024,
+            maximum_batch=2048,
+            batch_wait_ms=4.0,
+        ),
+        build_profile("games_4_leaves_24", actor_count, 4, 24),
+        build_profile("recommended_6x24", actor_count, 6, 24),
+        build_profile("games_6_leaves_32", actor_count, 6, 32),
+        build_profile("games_8_leaves_24", actor_count, 8, 24),
+        build_profile("games_8_leaves_32", actor_count, 8, 32),
+        build_profile("games_12_leaves_24", actor_count, 12, 24),
+        build_profile("games_14_leaves_24", actor_count, 14, 24),
+        build_profile(
+            "recommended_batch_384",
+            actor_count,
+            6,
+            24,
+            target_batch=384,
+            maximum_batch=512,
+            batch_wait_ms=1.0,
+        ),
+        build_profile(
+            "recommended_wait_0_5ms",
+            actor_count,
+            6,
+            24,
+            batch_wait_ms=0.5,
+        ),
+        build_profile(
+            "recommended_wait_1ms",
+            actor_count,
+            6,
+            24,
+            batch_wait_ms=1.0,
+        ),
+        build_profile(
+            f"actors_{actor_count + 4}",
+            actor_count + 4,
+            6,
+            24,
+            batch_wait_ms=1.0,
+        ),
+        build_profile(
+            f"actors_{actor_count + 8}",
+            actor_count + 8,
+            6,
+            24,
+            batch_wait_ms=1.0,
+        ),
     ]
 
 
@@ -139,11 +216,15 @@ def metric_delta(start, end, elapsed, queue_samples, gpu_samples, cpu_percent):
     }
 
 
-def flatten_result(profile, metrics):
+def flatten_result(profile, metrics, run_stage="sweep", confirmation_rank=""):
     result = {
         "configuration_id": profile.profile_id,
+        "run_stage": run_stage,
+        "confirmation_rank": confirmation_rank,
+        "actor_count": profile.actor_count,
         "games_per_actor": profile.games_per_actor,
         "pending_leaves": profile.pending_leaves,
+        "max_inflight_requests_per_actor": profile.max_inflight_requests_per_actor,
         "target_batch": profile.target_batch,
         "maximum_batch": profile.maximum_batch,
         "batch_wait_ms": profile.batch_wait_ms,
@@ -154,6 +235,34 @@ def flatten_result(profile, metrics):
     for index, value in enumerate(metrics["gpu_memory_mib"]):
         result[f"gpu_{index}_memory_mib"] = value
     return result
+
+
+def append_ranked_table(lines, title, ranked):
+    lines.extend(
+        [
+            f"## {title}",
+            "",
+            "| Rank | Configuration | Actors | Games | Leaves | Slots | Batch | Wait | "
+            "Moves/s | Evals/s | Avg batch | CPU | Blocked waits |",
+            "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for rank, row in enumerate(ranked, start=1):
+        lines.append(
+            f"| {rank} | {row['configuration_id']} | "
+            f"{row['actor_count']} | "
+            f"{row['games_per_actor']} | "
+            f"{row['pending_leaves']} | "
+            f"{row['max_inflight_requests_per_actor']} | "
+            f"{row['target_batch']}/{row['maximum_batch']} | "
+            f"{row['batch_wait_ms']:g} ms | "
+            f"{row['moves_per_second']:.2f} | "
+            f"{row['evaluations_per_second']:.1f} | "
+            f"{row['average_gpu_batch']:.1f} | "
+            f"{row['cpu_utilization']:.1f}% | "
+            f"{row['blocked_slot_waits']} |"
+        )
+    lines.append("")
 
 
 def write_benchmark_reports(results, output_dir, metadata):
@@ -173,61 +282,74 @@ def write_benchmark_reports(results, output_dir, metadata):
         writer.writeheader()
         writer.writerows(results)
 
-    ranked = sorted(results, key=lambda row: row["moves_per_second"], reverse=True)
+    sweep_results = [
+        row for row in results if row.get("run_stage", "sweep") == "sweep"
+    ]
+    confirmation_results = [
+        row for row in results if row.get("run_stage") == "confirmation"
+    ]
+    ranked_sweep = sorted(
+        sweep_results,
+        key=lambda row: row["moves_per_second"],
+        reverse=True,
+    )
+    ranked_confirmation = sorted(
+        confirmation_results,
+        key=lambda row: row["moves_per_second"],
+        reverse=True,
+    )
     baseline = next(
-        (row for row in results if row["configuration_id"] == "baseline"),
-        ranked[0] if ranked else None,
+        (row for row in sweep_results if row["configuration_id"] == "baseline"),
+        ranked_sweep[0] if ranked_sweep else None,
     )
 
     lines = [
         "# Fisher AI self-play benchmark",
         "",
         f"Generated: {metadata['generated_at']}",
-        f"Actor processes: {metadata['actor_count']}",
-        f"Warmup per configuration: {metadata['warmup_seconds']} seconds",
-        f"Measurement per configuration: {metadata['measure_seconds']} seconds",
+        f"Base actor processes: {metadata['actor_count']}",
+        f"Sweep profiles: {metadata['sweep_profile_count']}",
+        f"Warmup per run: {metadata['warmup_seconds']} seconds",
+        f"Sweep measurement: {metadata['measure_seconds']} seconds",
+        f"Confirmation measurement: {metadata['confirmation_seconds']} seconds",
+        f"Confirmation runs: {metadata['confirmation_run_count']}",
         f"Devices: {', '.join(metadata['devices'])}",
         "",
-        "Results are ranked by completed real chess moves per second. GPU and CPU "
-        "utilization are diagnostics rather than the primary score.",
+        "Sweep results use short measurements to cover the useful execution space. "
+        "The strongest sweep configurations are rerun for longer confirmation "
+        "measurements, and the final recommendation comes from those confirmation runs.",
         "",
-        "## Ranked results",
-        "",
-        "| Rank | Configuration | Moves/s | Evals/s | Avg batch | P95 batch | CPU | Games/hour |",
-        "|---:|---|---:|---:|---:|---:|---:|---:|",
     ]
 
-    for rank, row in enumerate(ranked, start=1):
-        lines.append(
-            f"| {rank} | {row['configuration_id']} | "
-            f"{row['moves_per_second']:.2f} | "
-            f"{row['evaluations_per_second']:.1f} | "
-            f"{row['average_gpu_batch']:.1f} | "
-            f"{row['p95_gpu_batch']:.0f} | "
-            f"{row['cpu_utilization']:.1f}% | "
-            f"{row['games_per_hour']:.1f} |"
-        )
+    append_ranked_table(lines, "Initial sweep results", ranked_sweep)
+    if ranked_confirmation:
+        append_ranked_table(lines, "Confirmed top configurations", ranked_confirmation)
 
-    if ranked:
-        best = ranked[0]
+    recommendation_pool = ranked_confirmation or ranked_sweep
+    if recommendation_pool:
+        best = recommendation_pool[0]
         improvement = 0.0
         if baseline and baseline["moves_per_second"] > 0:
             improvement = (
                 best["moves_per_second"] / baseline["moves_per_second"] - 1.0
             ) * 100.0
+        result_kind = "confirmed" if ranked_confirmation else "sweep"
         lines.extend(
             [
-                "",
                 "## Suggested manual settings",
                 "",
-                f"The highest-throughput result was `{best['configuration_id']}` at "
+                f"The highest-throughput {result_kind} result was "
+                f"`{best['configuration_id']}` at "
                 f"{best['moves_per_second']:.2f} moves/s, "
-                f"{improvement:+.1f}% relative to the baseline.",
+                f"{improvement:+.1f}% relative to the benchmark baseline.",
                 "",
                 "```json",
                 "{",
+                f"  \"actor_processes\": {best['actor_count']},",
                 f"  \"games_per_actor\": {best['games_per_actor']},",
                 f"  \"parallel_searches\": {best['pending_leaves']},",
+                "  \"max_inflight_requests_per_actor\": "
+                f"{best['max_inflight_requests_per_actor']},",
                 f"  \"inference_batch_size\": {best['target_batch']},",
                 f"  \"inference_max_batch_size\": {best['maximum_batch']},",
                 f"  \"inference_batch_wait_ms\": {best['batch_wait_ms']}",
@@ -243,19 +365,126 @@ def write_benchmark_reports(results, output_dir, metadata):
     return csv_path, markdown_path
 
 
+def run_profile(
+    base_config,
+    profile,
+    devices,
+    checkpoint_path,
+    warmup_seconds,
+    measure_seconds,
+    run_stage="sweep",
+    confirmation_rank="",
+):
+    with tempfile.TemporaryDirectory(prefix="fisher_benchmark_") as temp_dir:
+        temp_dir = Path(temp_dir)
+        config = copy.deepcopy(base_config)
+        config.search.parallel_searches = profile.pending_leaves
+        config.runtime.actor_processes = profile.actor_count
+        config.runtime.games_per_actor = profile.games_per_actor
+        config.runtime.max_inflight_requests_per_actor = (
+            profile.max_inflight_requests_per_actor
+        )
+        config.runtime.inference_batch_size = profile.target_batch
+        config.runtime.inference_max_batch_size = profile.maximum_batch
+        config.runtime.inference_batch_wait_ms = profile.batch_wait_ms
+        config.runtime.replay_path = str(temp_dir / "replay.lmdb")
+        config.runtime.status_interval_seconds = 3600.0
+        profile_config_path = temp_dir / "config.json"
+        save_config(config, profile_config_path)
+
+        pool = DistributedSelfPlayPool(
+            config_path=profile_config_path,
+            actor_count=profile.actor_count,
+            games_per_actor=profile.games_per_actor,
+            devices=devices,
+            checkpoint_path=checkpoint_path,
+        )
+        try:
+            pool.start()
+            time.sleep(warmup_seconds)
+            failure = pool.process_failure()
+            if failure:
+                raise RuntimeError(failure)
+
+            start = pool.metric_snapshot()
+            cpu_start = read_cpu_times()
+            queue_samples = []
+            gpu_samples = []
+            start_time = time.monotonic()
+            deadline = start_time + measure_seconds
+
+            while time.monotonic() < deadline:
+                failure = pool.process_failure()
+                if failure:
+                    raise RuntimeError(failure)
+                snapshot = pool.metric_snapshot()
+                queue_samples.append(
+                    (
+                        snapshot["request_queue_depth"],
+                        snapshot["replay_queue_depth"],
+                    )
+                )
+                gpu_samples.append(read_gpu_metrics())
+                time.sleep(min(1.0, max(deadline - time.monotonic(), 0.0)))
+
+            elapsed = time.monotonic() - start_time
+            cpu_end = read_cpu_times()
+            end = pool.metric_snapshot()
+            metrics = metric_delta(
+                start,
+                end,
+                elapsed,
+                queue_samples,
+                gpu_samples,
+                cpu_utilization(cpu_start, cpu_end),
+            )
+            return flatten_result(
+                profile,
+                metrics,
+                run_stage=run_stage,
+                confirmation_rank=confirmation_rank,
+            )
+        finally:
+            pool.stop()
+
+
+def print_profile(profile, prefix):
+    print(
+        f"{prefix} {profile.profile_id}: actors={profile.actor_count} "
+        f"games={profile.games_per_actor} leaves={profile.pending_leaves} "
+        f"slots={profile.max_inflight_requests_per_actor} "
+        f"batch={profile.target_batch}/{profile.maximum_batch} "
+        f"wait={profile.batch_wait_ms:g}ms",
+        flush=True,
+    )
+
+
+def print_result(result):
+    print(
+        f"  moves/s={result['moves_per_second']:.2f} "
+        f"evals/s={result['evaluations_per_second']:.1f} "
+        f"avg_batch={result['average_gpu_batch']:.1f} "
+        f"cpu={result['cpu_utilization']:.1f}% "
+        f"blocked={result['blocked_slot_waits']}",
+        flush=True,
+    )
+
+
 def run_benchmark(
     config_path="fisher_config.json",
     warmup_seconds=5.0,
     measure_seconds=15.0,
+    confirmation_seconds=30.0,
+    confirm_top=3,
     profile_limit=None,
     output_dir=None,
     actor_count=None,
     devices=None,
 ):
     base_config = load_config(config_path)
-    actor_count = actor_count or base_config.runtime.actor_processes
+    base_actor_count = actor_count or base_config.runtime.actor_processes
     devices = devices or base_config.runtime.self_play_devices
-    profiles = benchmark_profiles()
+    profiles = benchmark_profiles(base_actor_count)
     if profile_limit is not None:
         profiles = profiles[:profile_limit]
 
@@ -270,90 +499,63 @@ def run_benchmark(
         output_dir = Path(base_config.runtime.benchmark_dir) / timestamp
 
     results = []
+    sweep_results = []
     for profile_index, profile in enumerate(profiles, start=1):
-        print(
-            f"[{profile_index}/{len(profiles)}] {profile.profile_id}: "
-            f"games={profile.games_per_actor} leaves={profile.pending_leaves} "
-            f"batch={profile.target_batch}/{profile.maximum_batch} "
-            f"wait={profile.batch_wait_ms:g}ms",
-            flush=True,
+        print_profile(profile, f"[{profile_index}/{len(profiles)}]")
+        result = run_profile(
+            base_config,
+            profile,
+            devices,
+            checkpoint_path,
+            warmup_seconds,
+            measure_seconds,
         )
-        with tempfile.TemporaryDirectory(prefix="fisher_benchmark_") as temp_dir:
-            temp_dir = Path(temp_dir)
-            config = copy.deepcopy(base_config)
-            config.search.parallel_searches = profile.pending_leaves
-            config.runtime.games_per_actor = profile.games_per_actor
-            config.runtime.inference_batch_size = profile.target_batch
-            config.runtime.inference_max_batch_size = profile.maximum_batch
-            config.runtime.inference_batch_wait_ms = profile.batch_wait_ms
-            config.runtime.replay_path = str(temp_dir / "replay.lmdb")
-            config.runtime.status_interval_seconds = 3600.0
-            profile_config_path = temp_dir / "config.json"
-            save_config(config, profile_config_path)
+        sweep_results.append(result)
+        results.append(result)
+        print_result(result)
 
-            pool = DistributedSelfPlayPool(
-                config_path=profile_config_path,
-                actor_count=actor_count,
-                games_per_actor=profile.games_per_actor,
-                devices=devices,
-                checkpoint_path=checkpoint_path,
-            )
-            try:
-                pool.start()
-                time.sleep(warmup_seconds)
-                failure = pool.process_failure()
-                if failure:
-                    raise RuntimeError(failure)
+    confirmation_profiles = []
+    if confirmation_seconds > 0 and confirm_top > 0:
+        profile_by_id = {profile.profile_id: profile for profile in profiles}
+        ranked_sweep = sorted(
+            sweep_results,
+            key=lambda row: row["moves_per_second"],
+            reverse=True,
+        )
+        confirmation_count = min(confirm_top, len(ranked_sweep))
+        for rank, result in enumerate(ranked_sweep[:confirmation_count], start=1):
+            profile = profile_by_id[result["configuration_id"]]
+            confirmation_profiles.append((rank, profile))
 
-                start = pool.metric_snapshot()
-                cpu_start = read_cpu_times()
-                queue_samples = []
-                gpu_samples = []
-                start_time = time.monotonic()
-                deadline = start_time + measure_seconds
-
-                while time.monotonic() < deadline:
-                    failure = pool.process_failure()
-                    if failure:
-                        raise RuntimeError(failure)
-                    snapshot = pool.metric_snapshot()
-                    queue_samples.append(
-                        (
-                            snapshot["request_queue_depth"],
-                            snapshot["replay_queue_depth"],
-                        )
-                    )
-                    gpu_samples.append(read_gpu_metrics())
-                    time.sleep(min(1.0, max(deadline - time.monotonic(), 0.0)))
-
-                elapsed = time.monotonic() - start_time
-                cpu_end = read_cpu_times()
-                end = pool.metric_snapshot()
-                metrics = metric_delta(
-                    start,
-                    end,
-                    elapsed,
-                    queue_samples,
-                    gpu_samples,
-                    cpu_utilization(cpu_start, cpu_end),
-                )
-                result = flatten_result(profile, metrics)
-                results.append(result)
-                print(
-                    f"  moves/s={result['moves_per_second']:.2f} "
-                    f"evals/s={result['evaluations_per_second']:.1f} "
-                    f"avg_batch={result['average_gpu_batch']:.1f} "
-                    f"cpu={result['cpu_utilization']:.1f}%",
-                    flush=True,
-                )
-            finally:
-                pool.stop()
+    for confirmation_index, (rank, profile) in enumerate(
+        confirmation_profiles,
+        start=1,
+    ):
+        print_profile(
+            profile,
+            f"[confirm {confirmation_index}/{len(confirmation_profiles)}]",
+        )
+        result = run_profile(
+            base_config,
+            profile,
+            devices,
+            checkpoint_path,
+            warmup_seconds,
+            confirmation_seconds,
+            run_stage="confirmation",
+            confirmation_rank=rank,
+        )
+        results.append(result)
+        print_result(result)
 
     metadata = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "actor_count": actor_count,
+        "actor_count": base_actor_count,
+        "sweep_profile_count": len(profiles),
         "warmup_seconds": warmup_seconds,
         "measure_seconds": measure_seconds,
+        "confirmation_seconds": confirmation_seconds,
+        "confirmation_run_count": len(confirmation_profiles),
         "devices": devices,
     }
     csv_path, markdown_path = write_benchmark_reports(results, output_dir, metadata)
