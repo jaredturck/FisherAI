@@ -66,7 +66,7 @@
     "learner_device": "cuda:0",
     "self_play_games_per_batch": 64,
     "actor_processes": 24,
-    "games_per_actor": 6,
+    "games_per_actor": 4,
     "pin_actor_cpus": true,
     "inference_batch_size": 512,
     "inference_batch_wait_ms": 2.0,
