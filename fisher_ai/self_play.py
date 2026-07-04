@@ -1,0 +1,157 @@
+import chess
+import numpy as np
+
+from fisher_ai.encoding import encode_state
+from fisher_ai.game import GameState
+from fisher_ai.mcts import MCTSNode
+from fisher_ai.replay import GameRecord, TrainingSample
+
+
+class SelfPlaySession:
+    def __init__(self, max_game_plies, audit_resignation=False):
+        self.state = GameState(max_game_plies=max_game_plies)
+        self.root = MCTSNode(state=self.state)
+        self.pending_samples = []
+        self.moves = []
+        self.finished = False
+        self.forced_result = None
+        self.audit_resignation = audit_resignation
+        self.resignation_streak = 0
+
+    def add_search_sample(self, actions, visit_counts, policy_weight):
+        self.pending_samples.append(
+            {
+                "state": encode_state(self.state),
+                "legal_actions": actions,
+                "visit_counts": visit_counts,
+                "policy_weight": policy_weight,
+                "player": self.state.board.turn,
+            }
+        )
+
+    def play_action(self, action):
+        child = self.root.children[action]
+        child.ensure_state()
+        self.moves.append(child.move.uci())
+        self.state = child.state
+        self.root = child.detach()
+        self.finished = self.state.is_terminal()
+
+    def resign(self):
+        self.forced_result = -1 if self.state.board.turn == chess.WHITE else 1
+        self.finished = True
+
+    def build_record(self, checkpoint_step=0):
+        result = self.forced_result if self.forced_result is not None else self.state.final_result()
+        samples = []
+
+        for pending in self.pending_samples:
+            value = result if pending["player"] == chess.WHITE else -result
+            samples.append(
+                TrainingSample(
+                    pending["state"],
+                    pending["legal_actions"],
+                    pending["visit_counts"],
+                    value=value,
+                    policy_weight=pending["policy_weight"],
+                )
+            )
+
+        return GameRecord(
+            samples=samples,
+            moves=self.moves,
+            result=result,
+            checkpoint_step=checkpoint_step,
+        )
+
+
+class SelfPlayRunner:
+    def __init__(self, mcts, search_config, training_config=None, seed=7):
+        self.mcts = mcts
+        self.search_config = search_config
+        self.rng = np.random.default_rng(seed)
+        self.resignation_threshold = -0.9
+        self.resignation_consecutive_moves = 3
+        self.resignation_audit_fraction = 0.1
+
+        if training_config is not None:
+            self.resignation_threshold = training_config.resignation_threshold
+            self.resignation_consecutive_moves = training_config.resignation_consecutive_moves
+            self.resignation_audit_fraction = training_config.resignation_audit_fraction
+
+    def play_games(self, game_count, checkpoint_step=0, allow_resignation=False):
+        sessions = []
+        for _ in range(game_count):
+            audit_resignation = (
+                allow_resignation and self.rng.random() < self.resignation_audit_fraction
+            )
+            sessions.append(
+                SelfPlaySession(
+                    self.search_config.max_game_plies,
+                    audit_resignation=audit_resignation,
+                )
+            )
+
+        while True:
+            active = [session for session in sessions if not session.finished]
+            if not active:
+                break
+
+            full_search_flags = [
+                self.rng.random() < self.search_config.full_search_fraction for _ in active
+            ]
+            simulations = [
+                self.search_config.simulations
+                if full_search
+                else self.search_config.fast_simulations
+                for full_search in full_search_flags
+            ]
+            states = [session.state for session in active]
+            roots = [session.root for session in active]
+            searched_roots = self.mcts.run(
+                states,
+                roots=roots,
+                add_noise=True,
+                simulations=simulations,
+            )
+
+            for session, root, full_search in zip(
+                active,
+                searched_roots,
+                full_search_flags,
+                strict=True,
+            ):
+                actions, counts = self.mcts.visit_counts(root)
+                counts_uint16 = np.clip(counts, 0, np.iinfo(np.uint16).max).astype(np.uint16)
+                session.add_search_sample(
+                    actions.astype(np.uint16),
+                    counts_uint16,
+                    policy_weight=1.0 if full_search else 0.0,
+                )
+
+                if full_search and root.mean_value <= self.resignation_threshold:
+                    session.resignation_streak += 1
+                else:
+                    session.resignation_streak = 0
+
+                if (
+                    allow_resignation
+                    and not session.audit_resignation
+                    and session.resignation_streak >= self.resignation_consecutive_moves
+                ):
+                    session.resign()
+                    continue
+
+                temperature = (
+                    self.search_config.temperature
+                    if session.state.board.ply() < self.search_config.temperature_plies
+                    else self.search_config.late_temperature
+                )
+                action = self.mcts.choose_action(
+                    root,
+                    temperature=temperature,
+                    greedy=False,
+                )
+                session.play_action(action)
+
+        return [session.build_record(checkpoint_step) for session in sessions]
