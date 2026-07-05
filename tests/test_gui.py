@@ -1,6 +1,12 @@
 from fisher_ai import chess
 from fisher_ai.game import GameState
-from gui.main import BOARD_X, BOARD_Y, SQUARE_SIZE, ChessGUI
+from gui.main import (
+    BOARD_X,
+    BOARD_Y,
+    PIECE_RENDER_OFFSETS,
+    SQUARE_SIZE,
+    ChessGUI,
+)
 
 
 def test_gui_square_mapping():
@@ -22,3 +28,22 @@ def test_gui_defaults_promotion_to_queen():
     move = gui.choose_human_move(48, 56)
 
     assert move == chess.Move.from_uci("a7a8q")
+
+
+def test_gui_has_offsets_for_every_piece():
+    expected_pieces = {
+        (color, piece_type)
+        for color in (chess.WHITE, chess.BLACK)
+        for piece_type in (
+            chess.KING,
+            chess.QUEEN,
+            chess.BISHOP,
+            chess.KNIGHT,
+            chess.ROOK,
+            chess.PAWN,
+        )
+    }
+
+    assert set(PIECE_RENDER_OFFSETS) == expected_pieces
+    assert PIECE_RENDER_OFFSETS[(chess.WHITE, chess.PAWN)] == (16, -4)
+    assert PIECE_RENDER_OFFSETS[(chess.BLACK, chess.QUEEN)] == (-19, 1)

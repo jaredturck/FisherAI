@@ -38,6 +38,21 @@ PIECE_COLUMNS = {
     chess.PAWN: 5,
 }
 
+PIECE_RENDER_OFFSETS = {
+    (chess.WHITE, chess.KING): (-18, -4),
+    (chess.WHITE, chess.QUEEN): (-19, -4),
+    (chess.WHITE, chess.BISHOP): (-12, -4),
+    (chess.WHITE, chess.KNIGHT): (1, -4),
+    (chess.WHITE, chess.ROOK): (8, -4),
+    (chess.WHITE, chess.PAWN): (16, -4),
+    (chess.BLACK, chess.KING): (-18, 0),
+    (chess.BLACK, chess.QUEEN): (-19, 1),
+    (chess.BLACK, chess.BISHOP): (-10, 0),
+    (chess.BLACK, chess.KNIGHT): (1, 0),
+    (chess.BLACK, chess.ROOK): (8, 0),
+    (chess.BLACK, chess.PAWN): (16, 1),
+}
+
 LIGHT_SQUARE = (211, 224, 238, 215)
 DARK_SQUARE = (30, 79, 126, 225)
 SELECTED_SQUARE = (227, 178, 63, 230)
@@ -320,7 +335,11 @@ class ChessGUI:
                 if self.state:
                     piece = self.piece_at(square)
                     if piece:
-                        self.screen.blit(self.piece_sprites[piece], (x, y))
+                        offset_x, offset_y = PIECE_RENDER_OFFSETS[piece]
+                        self.screen.blit(
+                            self.piece_sprites[piece],
+                            (x + offset_x, y + offset_y),
+                        )
 
         self.draw_coordinates()
         pygame.draw.rect(
