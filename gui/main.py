@@ -25,6 +25,10 @@ SQUARE_SIZE = 90
 BOARD_SIZE = SQUARE_SIZE * 8
 PANEL_X = BOARD_X + BOARD_SIZE + 28
 PANEL_WIDTH = WINDOW_WIDTH - PANEL_X - 28
+PANEL_PADDING = 18
+PANEL_RADIUS = 14
+BUTTON_RADIUS = 9
+FOOTER_GAP = 12
 
 HUMAN_COLOR = chess.WHITE
 ENGINE_COLOR = chess.BLACK
@@ -78,7 +82,14 @@ class ChessGUI:
 
         self.background = self.load_background()
         self.piece_sprites = self.load_piece_sprites()
-        self.new_game_button = pygame.Rect(PANEL_X, 680, PANEL_WIDTH, 48)
+        footer_height = self.small_font.get_height()
+        self.footer_y = BOARD_Y + BOARD_SIZE - PANEL_PADDING - footer_height
+        self.new_game_button = pygame.Rect(
+            PANEL_X + PANEL_PADDING,
+            self.footer_y - FOOTER_GAP - 48,
+            PANEL_WIDTH - PANEL_PADDING * 2,
+            48,
+        )
 
         self.state = None
         self.search = None
@@ -198,12 +209,31 @@ class ChessGUI:
     def legal_moves_from(self, square):
         return [move for move in self.state.board.legal_moves if move.from_square == square]
 
+    def castling_rook_square(self, move):
+        if self.piece_at(move.from_square) != (self.state.board.turn, chess.KING):
+            return None
+        if abs(move.to_square - move.from_square) != 2:
+            return None
+
+        rank_start = move.from_square - chess.square_file(move.from_square)
+        return rank_start + (7 if move.to_square > move.from_square else 0)
+
     def choose_human_move(self, from_square, to_square):
+        legal_moves = list(self.state.board.legal_moves)
         candidates = [
             move
-            for move in self.state.board.legal_moves
+            for move in legal_moves
             if move.from_square == from_square and move.to_square == to_square
         ]
+
+        if not candidates:
+            candidates = [
+                move
+                for move in legal_moves
+                if move.from_square == from_square
+                and self.castling_rook_square(move) == to_square
+            ]
+
         if not candidates:
             return None
 
@@ -230,24 +260,28 @@ class ChessGUI:
                 self.select_square(square)
             return
 
+        move = self.choose_human_move(self.selected_square, square)
+        if move is not None:
+            self.clear_selection()
+            self.play_move(move)
+            if not self.state.is_terminal():
+                self.start_engine_move()
+            return
+
         if piece and piece[0] == HUMAN_COLOR:
             self.select_square(square)
-            return
-
-        move = self.choose_human_move(self.selected_square, square)
-        self.clear_selection()
-        if move is None:
-            return
-
-        self.play_move(move)
-        if not self.state.is_terminal():
-            self.start_engine_move()
+        else:
+            self.clear_selection()
 
     def select_square(self, square):
+        moves = self.legal_moves_from(square)
         self.selected_square = square
-        self.legal_destinations = {
-            move.to_square for move in self.legal_moves_from(square)
-        }
+        self.legal_destinations = {move.to_square for move in moves}
+        self.legal_destinations.update(
+            rook_square
+            for move in moves
+            if (rook_square := self.castling_rook_square(move)) is not None
+        )
 
     def clear_selection(self):
         self.selected_square = None
@@ -374,52 +408,64 @@ class ChessGUI:
 
     def draw_panel(self):
         panel = pygame.Surface((PANEL_WIDTH, BOARD_SIZE), pygame.SRCALPHA)
-        panel.fill(PANEL_COLOR)
+        pygame.draw.rect(panel, PANEL_COLOR, panel.get_rect(), border_radius=PANEL_RADIUS)
         self.screen.blit(panel, (PANEL_X, BOARD_Y))
 
-        self.draw_text("FisherAI", self.title_font, ACCENT_TEXT, PANEL_X + 18, 62)
-        self.draw_text(self.status, self.body_font, TEXT_COLOR, PANEL_X + 18, 116)
+        content_x = PANEL_X + PANEL_PADDING
+        self.draw_text("FisherAI", self.title_font, ACCENT_TEXT, content_x, 62)
+        self.draw_text(self.status, self.body_font, TEXT_COLOR, content_x, 116)
 
-        self.draw_text("Engine", self.body_font, ACCENT_TEXT, PANEL_X + 18, 172)
+        self.draw_text("Engine", self.body_font, ACCENT_TEXT, content_x, 172)
         self.draw_text(
             f"Checkpoint: {self.checkpoint_step:,}",
             self.small_font,
             TEXT_COLOR,
-            PANEL_X + 18,
+            content_x,
             205,
         )
         self.draw_text(
             f"Device: {self.device or 'not loaded'}",
             self.small_font,
             TEXT_COLOR,
-            PANEL_X + 18,
+            content_x,
             231,
         )
         self.draw_text(
             f"Search: {self.engine_simulations:,} simulations",
             self.small_font,
             TEXT_COLOR,
-            PANEL_X + 18,
+            content_x,
             257,
         )
 
-        self.draw_text("Moves", self.body_font, ACCENT_TEXT, PANEL_X + 18, 312)
+        self.draw_text("Moves", self.body_font, ACCENT_TEXT, content_x, 312)
         self.draw_move_history()
 
-        pygame.draw.rect(self.screen, (32, 82, 128), self.new_game_button, border_radius=7)
+        pygame.draw.rect(
+            self.screen,
+            (32, 82, 128),
+            self.new_game_button,
+            border_radius=BUTTON_RADIUS,
+        )
         pygame.draw.rect(
             self.screen,
             (214, 176, 92),
             self.new_game_button,
             width=2,
-            border_radius=7,
+            border_radius=BUTTON_RADIUS,
         )
         button_text = self.body_font.render("New Game", True, TEXT_COLOR)
         button_x = self.new_game_button.centerx - button_text.get_width() // 2
         button_y = self.new_game_button.centery - button_text.get_height() // 2
         self.screen.blit(button_text, (button_x, button_y))
 
-        self.draw_text("You play White", self.small_font, MUTED_TEXT, PANEL_X + 18, 752)
+        self.draw_text(
+            "You play White",
+            self.small_font,
+            MUTED_TEXT,
+            content_x,
+            self.footer_y,
+        )
 
     def draw_move_history(self):
         visible_moves = self.move_history[-18:]
@@ -434,7 +480,7 @@ class ChessGUI:
                 line,
                 self.small_font,
                 TEXT_COLOR,
-                PANEL_X + 18,
+                PANEL_X + PANEL_PADDING,
                 346 + (offset // 2) * 31,
             )
 
