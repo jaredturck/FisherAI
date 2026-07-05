@@ -107,7 +107,7 @@ class AlphaZeroTrainer:
         value_normalizer,
     ):
         policy_logits, predicted_values = self.model(states)
-        legal_logits = policy_logits.gather(1, legal_actions)
+        legal_logits = policy_logits.gather(1, legal_actions).float()
         legal_logits = legal_logits.masked_fill(~legal_mask, -1e9)
         log_policy = F.log_softmax(legal_logits, dim=1)
 
