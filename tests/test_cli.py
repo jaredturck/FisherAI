@@ -1,5 +1,6 @@
 import argparse
 import sys
+from types import ModuleType
 
 import pytest
 
@@ -12,9 +13,11 @@ def test_cli_only_exposes_required_commands():
         action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
     )
 
-    assert set(subparsers.choices) == {"workstation", "benchmark"}
+    assert set(subparsers.choices) == {"workstation", "benchmark", "gui"}
+    assert parser.prog == "python -m fisher_ai"
     assert parser.parse_args(["workstation"]).config == "fisher_config.json"
     assert parser.parse_args(["benchmark"]).config == "fisher_config.json"
+    assert parser.parse_args(["gui"]).handler is cli.command_gui
 
     for command in ("init", "self-play", "learn", "train", "evaluate", "uci"):
         with pytest.raises(SystemExit):
@@ -72,3 +75,14 @@ def test_workstation_uses_configured_pool_and_internal_learner(monkeypatch):
     assert calls["monitored"] == [process]
     assert calls["started"]
     assert calls["stopped"]
+
+
+def test_gui_command_launches_gui(monkeypatch):
+    launched = []
+    gui_module = ModuleType("gui.main")
+    gui_module.main = lambda: launched.append(True)
+    monkeypatch.setitem(sys.modules, "gui.main", gui_module)
+
+    cli.command_gui(argparse.Namespace())
+
+    assert launched == [True]

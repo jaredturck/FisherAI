@@ -80,8 +80,14 @@ def command_benchmark(args):
     print(f"Summary: {markdown_path}")
 
 
+def command_gui(args):
+    from gui.main import main
+
+    main()
+
+
 def build_parser():
-    parser = argparse.ArgumentParser(prog="fisher-ai")
+    parser = argparse.ArgumentParser(prog="python -m fisher_ai")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     workstation_parser = subparsers.add_parser(
@@ -97,6 +103,12 @@ def build_parser():
     )
     benchmark_parser.add_argument("--config", default="fisher_config.json")
     benchmark_parser.set_defaults(handler=command_benchmark)
+
+    gui_parser = subparsers.add_parser(
+        "gui",
+        help="play against the latest checkpoint",
+    )
+    gui_parser.set_defaults(handler=command_gui)
 
     return parser
 
