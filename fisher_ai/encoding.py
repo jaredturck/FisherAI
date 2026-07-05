@@ -111,39 +111,96 @@ def encode_history(
     return output
 
 
-def encode_state(state):
+def encode_state(state, output=None):
     return encode_history(
         state.history,
         state.board.turn,
         state.board.ply(),
         castling_rights_mask(state.board),
         state.board.halfmove_clock,
+        output=output,
     )
+
+
+def calculate_action(from_square, to_square, promotion, current_color):
+    canonical_from = canonical_square(from_square, current_color)
+    canonical_to = canonical_square(to_square, current_color)
+    from_row, from_col = square_row_col(canonical_from)
+    to_row, to_col = square_row_col(canonical_to)
+    row_delta = to_row - from_row
+    col_delta = to_col - from_col
+
+    if promotion in UNDERPROMOTION_PIECES:
+        if row_delta != 1 or col_delta not in (-1, 0, 1):
+            return -1
+        direction_index = col_delta + 1
+        piece_index = UNDERPROMOTION_PIECES.index(promotion)
+        move_plane = 64 + direction_index * 3 + piece_index
+        return move_plane * 64 + canonical_from
+
+    delta = (row_delta, col_delta)
+    if delta in KNIGHT_DIRECTIONS:
+        move_plane = 56 + KNIGHT_DIRECTIONS.index(delta)
+        return move_plane * 64 + canonical_from
+
+    distance = max(abs(row_delta), abs(col_delta))
+    if distance < 1 or distance > 7:
+        return -1
+    direction = (
+        0 if row_delta == 0 else row_delta // abs(row_delta),
+        0 if col_delta == 0 else col_delta // abs(col_delta),
+    )
+    if direction not in QUEEN_DIRECTIONS:
+        return -1
+    if not (
+        row_delta == 0 or col_delta == 0 or abs(row_delta) == abs(col_delta)
+    ):
+        return -1
+
+    move_plane = QUEEN_DIRECTIONS.index(direction) * 7 + distance - 1
+    return move_plane * 64 + canonical_from
+
+
+PROMOTION_LOOKUP_INDEX = {
+    None: 0,
+    chess.QUEEN: 0,
+    chess.KNIGHT: 1,
+    chess.BISHOP: 2,
+    chess.ROOK: 3,
+}
+ACTION_LOOKUP = np.full((2, 4, 64, 64), -1, dtype=np.int16)
+for color in (chess.BLACK, chess.WHITE):
+    for from_square in range(64):
+        for to_square in range(64):
+            ACTION_LOOKUP[int(color), 0, from_square, to_square] = (
+                calculate_action(from_square, to_square, None, color)
+            )
+            for promotion_index, promotion in enumerate(
+                UNDERPROMOTION_PIECES,
+                start=1,
+            ):
+                ACTION_LOOKUP[
+                    int(color),
+                    promotion_index,
+                    from_square,
+                    to_square,
+                ] = calculate_action(
+                    from_square,
+                    to_square,
+                    promotion,
+                    color,
+                )
 
 
 def move_to_action(move, current_color):
-    from_square = canonical_square(move.from_square, current_color)
-    to_square = canonical_square(move.to_square, current_color)
-    from_row, from_col = square_row_col(from_square)
-    to_row, to_col = square_row_col(to_square)
-    delta = (to_row - from_row, to_col - from_col)
-
-    if move.promotion in UNDERPROMOTION_PIECES:
-        direction_index = {-1: 0, 0: 1, 1: 2}[delta[1]]
-        piece_index = UNDERPROMOTION_PIECES.index(move.promotion)
-        move_plane = 64 + direction_index * 3 + piece_index
-        return move_plane * 64 + from_square
-
-    if delta in KNIGHT_DIRECTIONS:
-        move_plane = 56 + KNIGHT_DIRECTIONS.index(delta)
-        return move_plane * 64 + from_square
-
-    distance = max(abs(delta[0]), abs(delta[1]))
-    direction = (
-        0 if delta[0] == 0 else delta[0] // abs(delta[0]),
-        0 if delta[1] == 0 else delta[1] // abs(delta[1]),
+    promotion_index = PROMOTION_LOOKUP_INDEX[move.promotion]
+    action = int(
+        ACTION_LOOKUP[
+            int(current_color),
+            promotion_index,
+            move.from_square,
+            move.to_square,
+        ]
     )
-    assert direction in QUEEN_DIRECTIONS
-    assert 1 <= distance <= 7
-    move_plane = QUEEN_DIRECTIONS.index(direction) * 7 + distance - 1
-    return move_plane * 64 + from_square
+    assert action >= 0
+    return action

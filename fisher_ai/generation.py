@@ -129,35 +129,39 @@ class RemoteEvaluator:
         self.max_request_batch = self.shared.states.shape[1]
         self.request_id = 0
 
-    def evaluate_encoded(self, encoded_states, legal_actions):
-        policies = []
-        values = []
+    def evaluate_encoded(self, encoded_states, legal_actions, legal_lengths):
+        batch_size = len(encoded_states)
+        policies = np.empty(
+            (batch_size, legal_actions.shape[1]),
+            dtype=np.float32,
+        )
+        values = np.empty(batch_size, dtype=np.float32)
 
-        for start in range(0, len(encoded_states), self.max_request_batch):
-            end = min(start + self.max_request_batch, len(encoded_states))
+        for start in range(0, batch_size, self.max_request_batch):
+            end = min(start + self.max_request_batch, batch_size)
             chunk_policies, chunk_values = self.evaluate_chunk(
                 encoded_states[start:end],
                 legal_actions[start:end],
+                legal_lengths[start:end],
             )
-            policies.extend(chunk_policies)
-            values.append(chunk_values)
+            policies[start:end, : chunk_policies.shape[1]] = chunk_policies
+            values[start:end] = chunk_values
 
-        return policies, np.concatenate(values)
+        return policies, values
 
-    def evaluate_chunk(self, encoded_states, legal_actions):
+    def evaluate_chunk(self, encoded_states, legal_actions, legal_lengths):
         batch_size = len(encoded_states)
-        for index, (encoded_state, actions) in enumerate(
-            zip(encoded_states, legal_actions, strict=True)
-        ):
-            assert len(actions) <= MAX_LEGAL_ACTIONS
-            self.shared.states[self.actor_id, index] = encoded_state
-            length = len(actions)
-            self.shared.legal_lengths[self.actor_id, index] = length
-            self.shared.legal_actions[
-                self.actor_id,
-                index,
-                :length,
-            ] = actions
+        max_actions = int(legal_lengths.max(initial=0))
+        self.shared.states[self.actor_id, :batch_size] = encoded_states
+        self.shared.legal_lengths[
+            self.actor_id,
+            :batch_size,
+        ] = legal_lengths
+        self.shared.legal_actions[
+            self.actor_id,
+            :batch_size,
+            :max_actions,
+        ] = legal_actions[:, :max_actions]
 
         self.request_id += 1
         request_id = self.request_id
@@ -195,16 +199,11 @@ class RemoteEvaluator:
         if error:
             raise RuntimeError(error)
 
-        policies = []
-        for index, actions in enumerate(legal_actions):
-            length = len(actions)
-            policies.append(
-                self.shared.policy_logits[
-                    self.actor_id,
-                    index,
-                    :length,
-                ].copy()
-            )
+        policies = self.shared.policy_logits[
+            self.actor_id,
+            :batch_size,
+            :max_actions,
+        ].copy()
         values = self.shared.values[self.actor_id, :batch_size].copy()
         return policies, values
 

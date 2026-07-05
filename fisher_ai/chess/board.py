@@ -720,12 +720,33 @@ class Board:
         return all(self.has_insufficient_material(color) for color in COLORS)
 
     def generate_legal_ep(self):
-        for move in self.generate_legal_moves():
-            if self.is_en_passant(move):
+        if self.ep_square is None:
+            return
+
+        king = self.king(self.turn)
+        if king is None:
+            yield from self.generate_pseudo_legal_ep()
+            return
+
+        blockers = self._slider_blockers(king)
+        checkers = self.attackers_mask(not self.turn, king)
+        if checkers:
+            moves = self._generate_evasions(
+                king,
+                checkers,
+                to_mask=BB_SQUARES[self.ep_square],
+            )
+        else:
+            moves = self.generate_pseudo_legal_ep()
+
+        for move in moves:
+            if self.is_en_passant(move) and self._is_safe(
+                king, blockers, move
+            ):
                 yield move
 
     def has_legal_en_passant(self):
-        return any(self.generate_legal_ep())
+        return self.ep_square is not None and any(self.generate_legal_ep())
 
     def position_key(self):
         return (

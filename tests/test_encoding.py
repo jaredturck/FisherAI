@@ -89,3 +89,16 @@ def test_game_state_copy_shares_immutable_history_snapshots():
     copied.push(chess.Move.from_uci("e7e5"))
     assert state.board.position_key() == original_key
     assert copied.board.position_key() != original_key
+
+
+def test_cached_repetition_count_does_not_recompute_the_position_key(
+    monkeypatch,
+):
+    state = GameState()
+
+    def fail_position_key(board):
+        raise AssertionError("position key should not be recomputed")
+
+    monkeypatch.setattr(chess.Board, "position_key", fail_position_key)
+
+    assert state.current_repetition_count() == 1

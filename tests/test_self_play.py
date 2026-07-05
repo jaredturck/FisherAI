@@ -7,11 +7,8 @@ from fisher_ai.self_play import SelfPlayRunner
 
 
 class UniformEvaluator:
-    def evaluate_encoded(self, encoded_states, legal_actions):
-        policies = [
-            np.zeros(len(actions), dtype=np.float32)
-            for actions in legal_actions
-        ]
+    def evaluate_encoded(self, encoded_states, legal_actions, legal_lengths):
+        policies = np.zeros(legal_actions.shape, dtype=np.float32)
         values = np.zeros(len(encoded_states), dtype=np.float32)
         return policies, values
 

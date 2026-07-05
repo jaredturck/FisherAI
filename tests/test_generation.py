@@ -12,12 +12,9 @@ class RecordingEvaluator:
     def __init__(self):
         self.batch_sizes = []
 
-    def evaluate_encoded(self, encoded_states, legal_actions):
+    def evaluate_encoded(self, encoded_states, legal_actions, legal_lengths):
         self.batch_sizes.append(len(encoded_states))
-        policies = [
-            np.zeros(len(actions), dtype=np.float32)
-            for actions in legal_actions
-        ]
+        policies = np.zeros(legal_actions.shape, dtype=np.float32)
         values = np.zeros(len(encoded_states), dtype=np.float32)
         return policies, values
 
@@ -56,9 +53,10 @@ def test_remote_evaluator_submits_one_shared_memory_request():
     result = []
 
     def evaluate():
-        states = [np.zeros((119, 8, 8), dtype=np.float16) for _ in range(40)]
-        actions = [np.asarray([0], dtype=np.uint16) for _ in range(40)]
-        result.append(evaluator.evaluate_encoded(states, actions))
+        states = np.zeros((40, 119, 8, 8), dtype=np.float16)
+        actions = np.zeros((40, 256), dtype=np.uint16)
+        lengths = np.ones(40, dtype=np.uint16)
+        result.append(evaluator.evaluate_encoded(states, actions, lengths))
 
     thread = threading.Thread(target=evaluate)
     thread.start()

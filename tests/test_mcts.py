@@ -6,11 +6,8 @@ from fisher_ai.mcts import MCTS
 
 
 class UniformEvaluator:
-    def evaluate_encoded(self, encoded_states, legal_actions):
-        policies = [
-            np.zeros(len(actions), dtype=np.float32)
-            for actions in legal_actions
-        ]
+    def evaluate_encoded(self, encoded_states, legal_actions, legal_lengths):
+        policies = np.zeros(legal_actions.shape, dtype=np.float32)
         values = np.zeros(len(encoded_states), dtype=np.float32)
         return policies, values
 
@@ -19,14 +16,13 @@ class BiasedEvaluator:
     def __init__(self, action):
         self.action = action
 
-    def evaluate_encoded(self, encoded_states, legal_actions):
-        policies = []
-        for actions in legal_actions:
-            policy = np.zeros(len(actions), dtype=np.float32)
+    def evaluate_encoded(self, encoded_states, legal_actions, legal_lengths):
+        policies = np.zeros(legal_actions.shape, dtype=np.float32)
+        for index, length in enumerate(legal_lengths):
+            actions = legal_actions[index, :length]
             matches = np.flatnonzero(actions == self.action)
             if len(matches):
-                policy[matches[0]] = 8
-            policies.append(policy)
+                policies[index, matches[0]] = 8
         values = np.zeros(len(encoded_states), dtype=np.float32)
         return policies, values
 
@@ -98,3 +94,34 @@ def test_tree_uses_array_records_and_reuses_selected_subtree():
     assert tree.visit_count == child_visits
     search.run([state], roots=[tree])
     assert tree.visit_count == child_visits + 8
+
+
+def test_expanded_nodes_keep_cached_game_states():
+    state = GameState()
+    search = MCTS(
+        UniformEvaluator(),
+        simulations=16,
+        parallel_searches=4,
+    )
+    tree = search.run([state])[0]
+    expanded_nodes = np.flatnonzero(
+        tree.first_children[: tree.next_free] != -1
+    )
+
+    assert len(expanded_nodes) > 1
+    assert all(
+        tree.state_cache[int(node_id)] is not None
+        for node_id in expanded_nodes
+    )
+
+
+def test_terminal_leaf_values_are_cached():
+    state = GameState(chess.Board("6k1/5Q2/6K1/8/8/8/8/8 w - - 0 1"))
+    search = MCTS(
+        UniformEvaluator(),
+        simulations=32,
+        parallel_searches=4,
+    )
+    tree = search.run([state])[0]
+
+    assert np.isfinite(tree.terminal_values[: tree.next_free]).any()
