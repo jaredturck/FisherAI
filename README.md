@@ -257,6 +257,18 @@ python -m fisher_ai evaluate \
     --games 100
 ```
 
+## Play against FisherAI
+
+The Pygame interface loads the latest checkpoint from the configured checkpoint directory.
+You play White and FisherAI uses the configured evaluation simulation count for each move.
+
+```bash
+python gui/main.py
+```
+
+Click a piece and then a highlighted destination square. Use the **New Game** button or
+press `R` to restart. Pawn promotion defaults to a queen.
+
 ## UCI
 
 ```bash
