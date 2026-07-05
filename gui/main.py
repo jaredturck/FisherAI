@@ -1,3 +1,5 @@
+# LEGACY GUI CODE WILL BE MIGRATED
+
 import pygame, time, chess
 from hf_model import ChessEngine, ChessTree
 
