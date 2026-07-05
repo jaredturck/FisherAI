@@ -1,6 +1,6 @@
-import chess
 import numpy as np
 
+from fisher_ai import chess
 from fisher_ai.encoding import encode_state
 from fisher_ai.game import GameState
 from fisher_ai.mcts import MCTSNode

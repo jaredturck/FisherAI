@@ -1,5 +1,6 @@
-import chess
 import numpy as np
+
+from fisher_ai import chess
 
 INPUT_PLANES = 119
 ACTION_PLANES = 73

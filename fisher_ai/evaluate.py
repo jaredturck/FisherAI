@@ -1,5 +1,4 @@
-import chess
-
+from fisher_ai import chess
 from fisher_ai.game import GameState
 from fisher_ai.mcts import MCTS, MCTSNode
 

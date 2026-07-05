@@ -1,8 +1,8 @@
 from collections import deque
 
-import chess
-import chess.polyglot
 import numpy as np
+
+from fisher_ai import chess
 
 PIECE_TYPES = (
     chess.PAWN,
@@ -16,9 +16,8 @@ PIECE_TYPES = (
 
 class PositionSnapshot:
     def __init__(self, board, repetition_count):
-        self.board = board.copy(stack=False)
         self.repetition_count = repetition_count
-        self.piece_planes = self.build_piece_planes(self.board)
+        self.piece_planes = self.build_piece_planes(board)
 
     @staticmethod
     def build_piece_planes(board):
@@ -31,13 +30,10 @@ class PositionSnapshot:
                     planes[color_index * 6 + piece_index, row, col] = 1
         return planes
 
-    def copy(self):
-        return self
-
 
 class GameState:
     def __init__(self, board=None, max_game_plies=512):
-        self.board = board.copy(stack=False) if board else chess.Board()
+        self.board = board.copy() if board else chess.Board()
         self.max_game_plies = max_game_plies
         self.repetition_counts = {}
         self.history = deque(maxlen=8)
@@ -48,7 +44,7 @@ class GameState:
 
     @staticmethod
     def position_key(board):
-        return chess.polyglot.zobrist_hash(board)
+        return board.position_key()
 
     @classmethod
     def from_fen(cls, fen, max_game_plies=512):
@@ -56,7 +52,7 @@ class GameState:
 
     def copy(self):
         state = object.__new__(GameState)
-        state.board = self.board.copy(stack=False)
+        state.board = self.board.copy()
         state.max_game_plies = self.max_game_plies
         state.repetition_counts = self.repetition_counts.copy()
         state.history = deque(self.history, maxlen=8)
@@ -78,9 +74,6 @@ class GameState:
         state.push(move)
         return state
 
-    def legal_moves(self):
-        return list(self.board.legal_moves)
-
     def current_repetition_count(self):
         return self.repetition_counts.get(self.position_key(self.board), 1)
 
@@ -93,9 +86,7 @@ class GameState:
             return True
         if self.board.halfmove_clock >= 100:
             return True
-        if self.board.is_stalemate() or self.board.is_insufficient_material():
-            return True
-        return self.board.is_seventyfive_moves()
+        return self.board.is_stalemate() or self.board.is_insufficient_material()
 
     def terminal_value(self):
         assert self.is_terminal()

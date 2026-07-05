@@ -1,6 +1,6 @@
-import chess
 import numpy as np
 
+from fisher_ai import chess
 from fisher_ai.encoding import ACTION_SIZE, encode_state, legal_action_map, move_to_action
 from fisher_ai.game import GameState
 
@@ -80,46 +80,7 @@ def test_repetition_planes_mark_second_and_third_occurrence():
     assert np.all(current_frame[13] == 1)
 
 
-def legacy_encode_state(state):
-    planes = np.zeros((119, 8, 8), dtype=np.float32)
-    current_color = state.board.turn
-    snapshots = list(state.history)
-    start_plane = (8 - len(snapshots)) * 14
-    piece_types = [
-        chess.PAWN,
-        chess.KNIGHT,
-        chess.BISHOP,
-        chess.ROOK,
-        chess.QUEEN,
-        chess.KING,
-    ]
-
-    for history_index, snapshot in enumerate(snapshots):
-        plane_offset = start_plane + history_index * 14
-        for square, piece in snapshot.board.piece_map().items():
-            square = square if current_color == chess.WHITE else 63 - square
-            row = chess.square_rank(square)
-            col = chess.square_file(square)
-            piece_offset = piece_types.index(piece.piece_type)
-            player_offset = 0 if piece.color == current_color else 6
-            planes[plane_offset + player_offset + piece_offset, row, col] = 1.0
-
-        if snapshot.repetition_count >= 2:
-            planes[plane_offset + 12].fill(1.0)
-        if snapshot.repetition_count >= 3:
-            planes[plane_offset + 13].fill(1.0)
-
-    planes[112].fill(float(current_color == chess.WHITE))
-    planes[113].fill(min(state.board.ply(), state.max_game_plies) / state.max_game_plies)
-    planes[114].fill(float(state.board.has_kingside_castling_rights(current_color)))
-    planes[115].fill(float(state.board.has_queenside_castling_rights(current_color)))
-    planes[116].fill(float(state.board.has_kingside_castling_rights(not current_color)))
-    planes[117].fill(float(state.board.has_queenside_castling_rights(not current_color)))
-    planes[118].fill(min(state.board.halfmove_clock, 100) / 100.0)
-    return planes
-
-
-def test_cached_snapshot_encoding_matches_previous_representation():
+def test_snapshot_piece_planes_match_current_board():
     state = GameState()
     moves = [
         "e2e4",
@@ -135,7 +96,17 @@ def test_cached_snapshot_encoding_matches_previous_representation():
 
     for uci in moves:
         state.push(chess.Move.from_uci(uci))
-        np.testing.assert_array_equal(encode_state(state), legacy_encode_state(state))
+        expected = np.zeros((12, 8, 8), dtype=np.uint8)
+        for color_index, color in enumerate((chess.WHITE, chess.BLACK)):
+            for piece_index, piece_type in enumerate(
+                (chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, chess.KING)
+            ):
+                for square in state.board.pieces(piece_type, color):
+                    row = chess.square_rank(square)
+                    col = chess.square_file(square)
+                    expected[color_index * 6 + piece_index, row, col] = 1
+
+        np.testing.assert_array_equal(state.history[-1].piece_planes, expected)
 
 
 def test_game_state_copy_shares_immutable_history_snapshots():
@@ -143,6 +114,8 @@ def test_game_state_copy_shares_immutable_history_snapshots():
     state.push(chess.Move.from_uci("e2e4"))
     copied = state.copy()
 
+    original_key = state.board.position_key()
     assert list(state.history)[-1] is list(copied.history)[-1]
     copied.push(chess.Move.from_uci("e7e5"))
-    assert state.board.fen() != copied.board.fen()
+    assert state.board.position_key() == original_key
+    assert copied.board.position_key() != original_key

@@ -1,6 +1,5 @@
 torch>=2.4
 numpy>=2.0
-python-chess>=1.999
 lmdb>=1.5
 zstandard>=0.23
 pytest>=8.0
