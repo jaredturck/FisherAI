@@ -1,5 +1,6 @@
 import argparse
 import sys
+from pathlib import Path
 from types import ModuleType
 
 import pytest
@@ -27,9 +28,27 @@ def test_cli_only_exposes_required_commands():
 def test_workstation_uses_configured_pool_and_internal_learner(monkeypatch):
     calls = {}
 
+    class Runtime:
+        actor_processes = 24
+        games_per_actor = 6
+        learner_device = "cuda:0"
+
+    class Config:
+        runtime = Runtime()
+
     class Manager:
         def latest_path(self):
-            return "checkpoint.pt"
+            return Path("checkpoint.pt")
+
+    class Notifier:
+        def __init__(self):
+            calls["notifier"] = self
+
+        def send(self, *args, **kwargs):
+            calls.setdefault("notifications", []).append((args, kwargs))
+
+        def close(self):
+            calls["notifier_closed"] = True
 
     class Pool:
         def __init__(self, **kwargs):
@@ -52,10 +71,11 @@ def test_workstation_uses_configured_pool_and_internal_learner(monkeypatch):
 
     process = Process()
 
-    monkeypatch.setattr(cli, "load_config", lambda path: object())
+    monkeypatch.setattr(cli, "load_config", lambda path: Config())
     monkeypatch.setattr(cli, "build_model", lambda config: object())
     monkeypatch.setattr(cli, "build_checkpoint_manager", lambda config: Manager())
     monkeypatch.setattr(cli, "DistributedSelfPlayPool", Pool)
+    monkeypatch.setattr(cli, "DiscordNotifier", Notifier)
     monkeypatch.setattr(
         cli.subprocess,
         "Popen",
@@ -75,6 +95,8 @@ def test_workstation_uses_configured_pool_and_internal_learner(monkeypatch):
     assert calls["monitored"] == [process]
     assert calls["started"]
     assert calls["stopped"]
+    assert calls["notifications"][0][0][0] == "Fisher AI training started"
+    assert calls["notifier_closed"]
 
 
 def test_gui_command_launches_gui(monkeypatch):

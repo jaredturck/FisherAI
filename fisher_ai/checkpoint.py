@@ -8,12 +8,11 @@ from fisher_ai.config import config_to_dict
 
 
 class CheckpointManager:
-    def __init__(self, directory, keep_recent=5, milestone_interval=10000):
+    def __init__(self, directory, keep_recent=10):
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         self.latest_file = self.directory / "latest.json"
         self.keep_recent = keep_recent
-        self.milestone_interval = milestone_interval
 
     def checkpoint_path(self, step):
         return self.directory / f"fisher_ai_{step:09d}.pt"
@@ -42,22 +41,10 @@ class CheckpointManager:
         self.prune()
         return path
 
-    def checkpoint_step(self, path):
-        return int(path.stem.rsplit("_", 1)[1])
-
     def prune(self):
         candidates = sorted(self.directory.glob("fisher_ai_*.pt"))
-        if len(candidates) <= self.keep_recent:
-            return
-
-        recent = set(candidates[-self.keep_recent :])
-        for path in candidates:
-            step = self.checkpoint_step(path)
-            milestone = step == 0 or (
-                self.milestone_interval > 0 and step % self.milestone_interval == 0
-            )
-            if path not in recent and not milestone:
-                path.unlink()
+        for path in candidates[: -self.keep_recent]:
+            path.unlink()
 
     def latest_path(self):
         if self.latest_file.exists():

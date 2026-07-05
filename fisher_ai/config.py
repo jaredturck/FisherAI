@@ -50,12 +50,6 @@ class TrainingConfig:
         self.replay_positions_per_game = values.get("replay_positions_per_game", 8)
         self.warmup_positions = values.get("warmup_positions", 20000)
         self.max_sample_ratio = values.get("max_sample_ratio", 2.0)
-        self.checkpoint_interval = values.get("checkpoint_interval", 500)
-        self.checkpoint_keep_recent = values.get("checkpoint_keep_recent", 5)
-        self.checkpoint_milestone_interval = values.get(
-            "checkpoint_milestone_interval",
-            10000,
-        )
         self.resignation_enabled_after_games = values.get(
             "resignation_enabled_after_games",
             50000,

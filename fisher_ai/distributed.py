@@ -589,11 +589,7 @@ def pin_actor_to_cpu(actor_id):
 
 
 def build_checkpoint_manager(config):
-    return CheckpointManager(
-        config.runtime.checkpoint_dir,
-        keep_recent=config.training.checkpoint_keep_recent,
-        milestone_interval=config.training.checkpoint_milestone_interval,
-    )
+    return CheckpointManager(config.runtime.checkpoint_dir)
 
 
 def load_inference_model(config, device, checkpoint_path=None):

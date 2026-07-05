@@ -139,11 +139,7 @@ class ChessGUI:
         if not checkpoint_dir.is_absolute():
             checkpoint_dir = ROOT_DIR / checkpoint_dir
 
-        manager = CheckpointManager(
-            checkpoint_dir,
-            keep_recent=config.training.checkpoint_keep_recent,
-            milestone_interval=config.training.checkpoint_milestone_interval,
-        )
+        manager = CheckpointManager(checkpoint_dir)
         checkpoint_path = manager.latest_path()
         if checkpoint_path is None:
             self.status = "No checkpoint found in checkpoints/"

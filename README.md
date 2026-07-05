@@ -16,7 +16,9 @@ pip install -r requirements.txt
 python -m fisher_ai workstation
 ```
 
-This creates the initial checkpoint when needed and starts self-play and learning. Settings are stored in `fisher_config.json`.
+This creates the initial checkpoint when needed and starts self-play and learning. A new checkpoint is saved after the first completed training burst at least 10 minutes after the previous save, and only the newest 10 are kept.
+
+Checkpoint updates are sent to Discord when `STATUS_WEBHOOK` is set in `.env`. Settings are stored in `fisher_config.json`.
 
 ## Play against Fisher AI
 

@@ -521,11 +521,7 @@ def run_benchmark(
     if profile_limit is not None:
         profiles = profiles[:profile_limit]
 
-    checkpoint_manager = CheckpointManager(
-        base_config.runtime.checkpoint_dir,
-        keep_recent=base_config.training.checkpoint_keep_recent,
-        milestone_interval=base_config.training.checkpoint_milestone_interval,
-    )
+    checkpoint_manager = CheckpointManager(base_config.runtime.checkpoint_dir)
     checkpoint_path = checkpoint_manager.latest_path()
     if checkpoint_path is None:
         checkpoint_path = checkpoint_manager.save(

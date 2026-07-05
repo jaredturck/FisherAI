@@ -48,14 +48,29 @@ def test_trainer_runs_one_update_with_mixed_policy_weights(tmp_path):
         )
     replay.add_game(GameRecord(samples=samples, result=1))
 
+    class Manager:
+        def __init__(self):
+            self.saved = 0
+
+        def save(self, *args, **kwargs):
+            self.saved += 1
+
+    manager = Manager()
     model = FisherNetwork(config.network)
-    trainer = AlphaZeroTrainer(model, replay, config, device="cpu")
+    trainer = AlphaZeroTrainer(
+        model,
+        replay,
+        config,
+        device="cpu",
+        checkpoint_manager=manager,
+    )
     metrics = trainer.train_step()
 
     assert metrics["step"] == 1
     assert metrics["loss"] > 0
     assert metrics["policy_loss"] > 0
     assert metrics["sampled_positions"] == 8
+    assert manager.saved == 0
     replay.close()
 
 

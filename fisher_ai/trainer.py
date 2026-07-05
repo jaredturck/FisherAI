@@ -166,12 +166,6 @@ class AlphaZeroTrainer:
         self.step += 1
         self.sampled_positions += batch_size
 
-        if (
-            self.checkpoint_manager is not None
-            and self.step % self.config.training.checkpoint_interval == 0
-        ):
-            self.save_checkpoint()
-
         return {
             "step": self.step,
             "loss": total_loss,

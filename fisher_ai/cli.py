@@ -10,6 +10,7 @@ from fisher_ai.checkpoint import CheckpointManager
 from fisher_ai.config import load_config
 from fisher_ai.distributed import DistributedSelfPlayPool
 from fisher_ai.network import FisherNetwork
+from fisher_ai.notifications import DiscordNotifier
 
 
 def build_model(config):
@@ -17,11 +18,7 @@ def build_model(config):
 
 
 def build_checkpoint_manager(config):
-    return CheckpointManager(
-        config.runtime.checkpoint_dir,
-        keep_recent=config.training.checkpoint_keep_recent,
-        milestone_interval=config.training.checkpoint_milestone_interval,
-    )
+    return CheckpointManager(config.runtime.checkpoint_dir)
 
 
 def ensure_checkpoint(config, model, manager):
@@ -52,20 +49,57 @@ def command_workstation(args):
         args.config,
     ]
     pool = DistributedSelfPlayPool(config_path=args.config)
+    notifier = DiscordNotifier()
     learner_process = None
 
     try:
         pool.start()
         print("Starting continuous learning on the configured learner GPU", flush=True)
         learner_process = subprocess.Popen(learner_command)
+        notifier.send(
+            "Fisher AI training started",
+            [
+                ("Actors", f"{config.runtime.actor_processes:,}"),
+                (
+                    "Active games",
+                    f"{config.runtime.actor_processes * config.runtime.games_per_actor:,}",
+                ),
+                ("Learner", config.runtime.learner_device),
+                ("Checkpoint", manager.latest_path().name, False),
+            ],
+            description="Self-play and learning are running.",
+            color="blue",
+            include_gpu_stats=True,
+        )
         pool.monitor(external_processes=[learner_process])
     except KeyboardInterrupt:
         print("Stopping Fisher AI workstation training", flush=True)
+        latest_path = manager.latest_path()
+        notifier.send(
+            "Fisher AI training stopped",
+            [("Latest checkpoint", latest_path.name if latest_path else "Unavailable")],
+            description="The workstation training process was stopped.",
+            color="orange",
+        )
+    except Exception as error:
+        latest_path = manager.latest_path()
+        notifier.send(
+            "Fisher AI training failed",
+            [
+                ("Error", str(error), False),
+                ("Latest checkpoint", latest_path.name if latest_path else "Unavailable"),
+            ],
+            description="The workstation training process exited unexpectedly.",
+            color="red",
+            include_gpu_stats=True,
+        )
+        raise
     finally:
         pool.stop()
         if learner_process is not None and learner_process.poll() is None:
             learner_process.terminate()
             learner_process.wait()
+        notifier.close()
 
 
 def command_benchmark(args):
