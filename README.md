@@ -43,7 +43,7 @@ Self-play uses randomized search allocation:
 - 75% receive 32 MCTS simulations.
 - Full-search positions train policy and value.
 - Fast-search positions train value only.
-- Evaluation and UCI play use 256 simulations by default.
+- GUI play uses 256 simulations by default.
 
 Search remains AlphaZero-style: PUCT selection, root Dirichlet noise, visit-count policy targets, final game-result value targets, subtree reuse, and opening exploration.
 
@@ -124,19 +124,15 @@ pip install -e .
 
 Install the PyTorch build appropriate for the local NVIDIA driver when a specific CUDA build is required.
 
-## Initialize
-
-```bash
-python -m fisher_ai init
-```
-
-This creates a random checkpoint and reports the model parameter count. Existing checkpoints and replay data remain compatible.
-
-## Start dual-GPU workstation training
+## Start workstation training
 
 ```bash
 python -m fisher_ai workstation
 ```
+
+This is the complete training entry point. It creates the initial random checkpoint when
+needed, starts the configured distributed self-play pool, and runs the learner in a separate
+internal process.
 
 Committed defaults:
 
@@ -152,36 +148,21 @@ Inference batch target/max:     512 / 1,024
 Actor inference request size:   automatic
 ```
 
-Stop the complete process group with `Ctrl+C`.
+Runtime choices come from `fisher_config.json`. Stop the complete process group with `Ctrl+C`.
 
-Override the actor layout when diagnosing:
-
-```bash
-python -m fisher_ai workstation \
-    --actors 24 \
-    --games-per-actor 6 \
-    --devices cuda:0 cuda:1
-```
-
-## One-off hardware benchmark
-
-Run the benchmark once before selecting the final execution parameters:
+## Run the hardware benchmark
 
 ```bash
 python -m fisher_ai benchmark
 ```
 
-The benchmark runs 15 focused profiles. It directly compares the restored process-level batched scheduler against the regressed per-game threaded scheduler, then explores the plausible batched combinations:
+The benchmark uses the committed benchmark procedure so results remain directly comparable.
+It creates the initial random checkpoint when no checkpoint exists, then runs 15 focused
+profiles covering the process-level batched scheduler, the previous threaded comparison,
+actor layouts, pending-leaf counts, batching waits, and GPU batch sizes.
 
-- the exact old CPU-utilization control: 24 actors, 6 games, 8 leaves;
-- the current threaded 4-game, 24-leaf configuration;
-- 4, 6, and 8 games per actor;
-- 8, 16, 24, and 32 pending leaves where useful;
-- 1 ms and 2 ms batching waits;
-- 512 and 768 target GPU batches;
-- 22 and 24 actor processes.
-
-Each sweep configuration uses five seconds of warmup and fifteen seconds of measurement. The top three sweep configurations are then rerun for thirty seconds each.
+Each sweep configuration uses five seconds of warmup and fifteen seconds of measurement. The
+top three sweep configurations are rerun for thirty seconds each.
 
 Results are written to a timestamped directory:
 
@@ -190,17 +171,10 @@ benchmarks/YYYYMMDD_HHMMSS/benchmark_results.csv
 benchmarks/YYYYMMDD_HHMMSS/benchmark_summary.md
 ```
 
-The benchmark does **not** modify `fisher_config.json`, checkpoints, or the real replay database. It uses temporary replay storage and the same checkpoint for every configuration. Reports include scheduler type, resolved actor request capacity, average actor request size, GPU batch size, throughput, system CPU utilization, actor work time, inference wait time, queue pressure, and GPU utilization.
-
-Useful shorter diagnostic run:
-
-```bash
-python -m fisher_ai benchmark \
-    --profiles 3 \
-    --warmup-seconds 2 \
-    --measure-seconds 5 \
-    --confirm-top 0
-```
+The benchmark does not modify `fisher_config.json` or the real replay database. Reports include
+scheduler type, resolved actor request capacity, average actor request size, GPU batch size,
+throughput, system CPU utilization, actor work time, inference wait time, queue pressure, and
+GPU utilization.
 
 ## Live metrics
 
@@ -213,52 +187,9 @@ request_avg=... batch_avg=... batch_p50=... batch_p95=...
 actor_compute=... inference_wait=... queue=... inflight=... replay_queue=...
 ```
 
-The most important measures are real moves per second, completed positions per second, evaluations per second, and games per hour. System CPU, actor compute, and inference wait are supporting diagnostics that show whether the actors or GPUs are limiting throughput.
-
-## Individual commands
-
-Distributed self-play without the learner:
-
-```bash
-python -m fisher_ai self-play \
-    --actors 24 \
-    --games-per-actor 6 \
-    --devices cuda:0 cuda:1 \
-    --games 1000
-```
-
-Single-process debugging path:
-
-```bash
-python -m fisher_ai self-play --actors 1 --games 8
-```
-
-One learner burst:
-
-```bash
-python -m fisher_ai learn --steps 100
-```
-
-Continuous learner:
-
-```bash
-python -m fisher_ai learn --steps 100 --continuous
-```
-
-Smoke-test learner update before the normal warmup:
-
-```bash
-python -m fisher_ai learn --steps 1 --force
-```
-
-## Evaluation
-
-```bash
-python -m fisher_ai evaluate \
-    --checkpoint-a checkpoints/fisher_ai_000010000.pt \
-    --checkpoint-b checkpoints/fisher_ai_000005000.pt \
-    --games 100
-```
+The most important measures are real moves per second, completed positions per second,
+evaluations per second, and games per hour. System CPU, actor compute, and inference wait are
+supporting diagnostics that show whether the actors or GPUs are limiting throughput.
 
 ## Play against FisherAI
 
@@ -269,16 +200,8 @@ You play White and FisherAI uses the configured evaluation simulation count for 
 python gui/main.py
 ```
 
-Click a piece and then a highlighted destination square. Use the **New Game** button or
-press `R` to restart. Pawn promotion defaults to a queen.
-
-## UCI
-
-```bash
-python -m fisher_ai uci
-```
-
-A UCI `go nodes N` command overrides the default 256 simulations for that move.
+Click a piece and then a highlighted destination square. Use the **New Game** button or press
+`R` to restart. Pawn promotion defaults to a queen.
 
 ## Verification
 
@@ -286,7 +209,6 @@ A UCI `go nodes N` command overrides the default 256 simulations for that move.
 ruff check .
 pytest
 python -m fisher_ai --help
+python -m fisher_ai workstation --help
 python -m fisher_ai benchmark --help
 ```
-
-Strength should be measured through fixed checkpoint matches rather than inferred from training age. Checkpoints can plateau or regress temporarily, so milestone evaluation remains important.

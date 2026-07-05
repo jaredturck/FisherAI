@@ -17,6 +17,7 @@ from fisher_ai.distributed import (
     THREADED_SCHEDULER,
     DistributedSelfPlayPool,
 )
+from fisher_ai.network import FisherNetwork
 
 
 @dataclass(frozen=True)
@@ -520,10 +521,18 @@ def run_benchmark(
     if profile_limit is not None:
         profiles = profiles[:profile_limit]
 
-    checkpoint_manager = CheckpointManager(base_config.runtime.checkpoint_dir)
+    checkpoint_manager = CheckpointManager(
+        base_config.runtime.checkpoint_dir,
+        keep_recent=base_config.training.checkpoint_keep_recent,
+        milestone_interval=base_config.training.checkpoint_milestone_interval,
+    )
     checkpoint_path = checkpoint_manager.latest_path()
     if checkpoint_path is None:
-        raise RuntimeError("Run `python -m fisher_ai init` before benchmarking")
+        checkpoint_path = checkpoint_manager.save(
+            FisherNetwork(base_config.network),
+            base_config,
+            0,
+        )
     checkpoint_path = str(Path(checkpoint_path).resolve())
 
     if output_dir is None:
