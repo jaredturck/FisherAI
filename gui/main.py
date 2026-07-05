@@ -8,7 +8,7 @@ from fisher_ai import chess
 from fisher_ai.checkpoint import CheckpointManager
 from fisher_ai.config import available_device, load_config
 from fisher_ai.game import GameState
-from fisher_ai.mcts import MCTS, MCTSNode, TorchEvaluator
+from fisher_ai.mcts import MCTS, TorchEvaluator
 from fisher_ai.network import FisherNetwork
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -297,7 +297,7 @@ class ChessGUI:
         thread.start()
 
     def compute_engine_move(self, state):
-        root = MCTSNode(state=state)
+        root = self.search.create_tree()
         root = self.search.run(
             [state],
             roots=[root],
@@ -305,7 +305,7 @@ class ChessGUI:
             simulations=self.engine_simulations,
         )[0]
         action = self.search.choose_action(root, greedy=True)
-        self.engine_results.put(root.children[action].move)
+        self.engine_results.put(root.move_for_action(action))
 
     def process_engine_result(self):
         if self.engine_results.empty():

@@ -1,3 +1,5 @@
+import queue
+
 from fisher_ai import chess
 from fisher_ai.game import GameState
 from gui.main import (
@@ -77,3 +79,52 @@ def test_gui_does_not_treat_two_square_rook_move_as_castling():
     rook_move = chess.Move.from_uci("a1c1")
 
     assert gui.castling_rook_square(rook_move) is None
+
+
+class FakeTree:
+    def __init__(self, move):
+        self.move = move
+        self.requested_action = None
+
+    def move_for_action(self, action):
+        self.requested_action = action
+        return self.move
+
+
+class FakeSearch:
+    def __init__(self, tree, action):
+        self.tree = tree
+        self.action = action
+        self.run_arguments = None
+
+    def create_tree(self):
+        return self.tree
+
+    def run(self, states, roots, add_noise, simulations):
+        self.run_arguments = (states, roots, add_noise, simulations)
+        return roots
+
+    def choose_action(self, root, greedy):
+        assert root is self.tree
+        assert greedy is True
+        return self.action
+
+
+def test_gui_engine_move_uses_current_mcts_tree_api():
+    gui = object.__new__(ChessGUI)
+    state = GameState()
+    move = chess.Move.from_uci("e7e5")
+    tree = FakeTree(move)
+    gui.search = FakeSearch(tree, action=123)
+    gui.engine_simulations = 256
+    gui.engine_results = queue.Queue()
+
+    gui.compute_engine_move(state)
+
+    states, roots, add_noise, simulations = gui.search.run_arguments
+    assert states == [state]
+    assert roots == [tree]
+    assert add_noise is False
+    assert simulations == 256
+    assert tree.requested_action == 123
+    assert gui.engine_results.get_nowait() == move
