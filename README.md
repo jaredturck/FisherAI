@@ -1,3 +1,4 @@
+````markdown
 # Fisher AI
 
 Fisher AI is an AlphaZero-style chess engine built with PyTorch. It learns entirely through self-play using Monte Carlo Tree Search and is optimized for a dual RTX 3090 workstation.
@@ -5,8 +6,6 @@ Fisher AI is an AlphaZero-style chess engine built with PyTorch. It learns entir
 ## Installation
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
@@ -28,10 +27,13 @@ python -m fisher_ai gui
 
 The GUI loads the latest checkpoint, so training must have been started at least once.
 
-## Benchmark
+## Check and benchmark
 
 ```bash
+ruff check .
+pytest
 python -m fisher_ai benchmark
 ```
 
-Results are saved under `benchmarks/`.
+Benchmark results are saved under `benchmarks/`.
+````
