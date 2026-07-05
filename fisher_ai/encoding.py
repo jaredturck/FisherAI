@@ -125,8 +125,8 @@ def legal_actions(state):
 
 
 def policy_from_visits(root):
-    actions = np.asarray(sorted(root.children), dtype=np.int64)
-    visits = np.asarray([root.children[action].visit_count for action in actions], dtype=np.float32)
+    actions = root.child_actions.astype(np.int64, copy=True)
+    visits = root.child_visits.astype(np.float32, copy=True)
     total = visits.sum()
     if total == 0:
         visits.fill(1.0 / len(visits))

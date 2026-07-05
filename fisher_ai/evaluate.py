@@ -1,17 +1,20 @@
 from fisher_ai import chess
 from fisher_ai.game import GameState
-from fisher_ai.mcts import MCTS, MCTSNode
+from fisher_ai.mcts import MCTS, MCTSTree
 
 
 def play_game(white_evaluator, black_evaluator, search_config, seed=7):
     state = GameState(max_game_plies=search_config.max_game_plies)
     white_search = MCTS(white_evaluator, search_config, seed=seed)
     black_search = MCTS(black_evaluator, search_config, seed=seed + 1)
+    white_tree = MCTSTree(search_config.tree_capacity)
+    black_tree = MCTSTree(search_config.tree_capacity)
     moves = []
 
     while not state.is_terminal():
         search = white_search if state.board.turn == chess.WHITE else black_search
-        root = MCTSNode(state=state)
+        root = white_tree if state.board.turn == chess.WHITE else black_tree
+        root.reset()
         root = search.run(
             [state],
             roots=[root],
@@ -19,10 +22,9 @@ def play_game(white_evaluator, black_evaluator, search_config, seed=7):
             simulations=search_config.evaluation_simulations,
         )[0]
         action = search.choose_action(root, greedy=True)
-        child = root.children[action]
-        child.ensure_state()
-        moves.append(child.move.uci())
-        state = child.state
+        move = root.move_for_action(action)
+        moves.append(move.uci())
+        state.push(move)
 
     return state.final_result(), moves
 

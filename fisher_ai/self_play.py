@@ -3,7 +3,7 @@ import numpy as np
 from fisher_ai import chess
 from fisher_ai.encoding import encode_state
 from fisher_ai.game import GameState
-from fisher_ai.mcts import MCTSNode
+from fisher_ai.mcts import MCTSTree
 from fisher_ai.replay import GameRecord, TrainingSample
 
 
@@ -11,11 +11,12 @@ class SelfPlaySession:
     def __init__(
         self,
         max_game_plies,
+        tree_capacity,
         checkpoint_step=0,
         audit_resignation=False,
     ):
         self.state = GameState(max_game_plies=max_game_plies)
-        self.root = MCTSNode(state=self.state)
+        self.root = MCTSTree(tree_capacity)
         self.pending_samples = []
         self.moves = []
         self.finished = False
@@ -36,11 +37,9 @@ class SelfPlaySession:
         )
 
     def play_action(self, action):
-        child = self.root.children[action]
-        child.ensure_state()
-        self.moves.append(child.move.uci())
-        self.state = child.state
-        self.root = child.detach()
+        move = self.root.advance(action)
+        self.moves.append(move.uci())
+        self.state.push(move)
         self.finished = self.state.is_terminal()
 
     def resign(self):
@@ -94,6 +93,7 @@ class SelfPlayRunner:
         )
         return SelfPlaySession(
             self.search_config.max_game_plies,
+            self.search_config.tree_capacity,
             checkpoint_step=checkpoint_step,
             audit_resignation=audit_resignation,
         )

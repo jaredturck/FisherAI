@@ -98,10 +98,13 @@ Completed games are sent to a dedicated replay writer and committed to LMDB imme
 - Each actor advances all of its sessions together instead of creating blocking per-game Python threads.
 - One combined actor inference request carries pending leaves from multiple games.
 - One shared inference queue dynamically balances both GPUs.
-- MCTS child statistics use contiguous NumPy arrays for vectorized PUCT selection.
-- Search nodes reconstruct a selected leaf from one root-state copy instead of copying every intermediate state.
+- Each active game uses one preallocated MCTS arena instead of per-move Python objects,
+  dictionaries, lists, and NumPy arrays.
+- Actions, packed moves, priors, visits, values, virtual visits, and child ranges live in
+  contiguous typed arrays addressed by integer record IDs.
+- Selected leaves reconstruct state from one root-state copy and a temporary path of packed moves.
 - Immutable history snapshots cache piece planes and are shared across copied states.
-- Root encodings are reused for training samples rather than encoded twice.
+- Only the current root encoding is retained for its training sample; leaf encodings are temporary.
 - Pinned host buffers, FP16 inference, channels-last tensors, and GPU-side legal-policy gathering reduce transfer overhead.
 - Replay writing runs in a dedicated process with larger transactions.
 - Live timing separates actor compute, GPU-response waiting, request-queue waiting, and replay waiting.

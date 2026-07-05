@@ -31,6 +31,7 @@ class SearchConfig:
         self.temperature_plies = values.get("temperature_plies", 24)
         self.late_temperature = values.get("late_temperature", 0.1)
         self.max_game_plies = values.get("max_game_plies", 320)
+        self.tree_capacity = values.get("tree_capacity", 131072)
 
 
 class TrainingConfig:

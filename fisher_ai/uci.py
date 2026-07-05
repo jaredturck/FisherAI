@@ -2,7 +2,7 @@ import sys
 
 from fisher_ai import chess
 from fisher_ai.game import GameState
-from fisher_ai.mcts import MCTS, MCTSNode
+from fisher_ai.mcts import MCTS, MCTSTree
 
 
 class UCIEngine:
@@ -10,6 +10,7 @@ class UCIEngine:
         self.evaluator = evaluator
         self.search_config = search_config
         self.search = MCTS(evaluator, search_config, seed=seed)
+        self.tree = MCTSTree(search_config.tree_capacity)
         self.state = GameState(max_game_plies=search_config.max_game_plies)
 
     def set_position(self, command):
@@ -25,13 +26,15 @@ class UCIEngine:
         if move_index < len(parts):
             for uci in parts[move_index + 1 :]:
                 self.state.push(chess.Move.from_uci(uci))
+        self.tree.reset()
 
     def best_move(self, simulations=None):
         if self.state.is_terminal():
             return None
 
         simulations = simulations or self.search_config.evaluation_simulations
-        root = MCTSNode(state=self.state)
+        self.tree.reset()
+        root = self.tree
         root = self.search.run(
             [self.state],
             roots=[root],
@@ -39,7 +42,7 @@ class UCIEngine:
             simulations=simulations,
         )[0]
         action = self.search.choose_action(root, greedy=True)
-        return root.children[action].move
+        return root.move_for_action(action)
 
     def run(self):
         for raw_line in sys.stdin:
@@ -53,6 +56,7 @@ class UCIEngine:
                 print("readyok", flush=True)
             elif line == "ucinewgame":
                 self.state = GameState(max_game_plies=self.search_config.max_game_plies)
+                self.tree.reset()
             elif line.startswith("position "):
                 self.set_position(line)
             elif line.startswith("go"):
