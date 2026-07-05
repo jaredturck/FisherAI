@@ -2,11 +2,19 @@
 
 FILE_NAMES = "abcdefgh"
 RANK_NAMES = "12345678"
-SQUARE_NAMES = [file_name + rank_name for rank_name in RANK_NAMES for file_name in FILE_NAMES]
+SQUARE_NAMES = [
+    file_name + rank_name
+    for rank_name in RANK_NAMES
+    for file_name in FILE_NAMES
+]
 
 
 def parse_square(name):
-    if len(name) != 2 or name[0] not in FILE_NAMES or name[1] not in RANK_NAMES:
+    if (
+        len(name) != 2
+        or name[0] not in FILE_NAMES
+        or name[1] not in RANK_NAMES
+    ):
         raise ValueError(f"invalid square: {name!r}")
     return FILE_NAMES.index(name[0]) + RANK_NAMES.index(name[1]) * 8
 
@@ -24,7 +32,10 @@ def square_rank(square):
 
 
 def square_distance(a, b):
-    return max(abs(square_file(a) - square_file(b)), abs(square_rank(a) - square_rank(b)))
+    return max(
+        abs(square_file(a) - square_file(b)),
+        abs(square_rank(a) - square_rank(b)),
+    )
 
 
 A1 = 0
@@ -136,7 +147,10 @@ def _sliding_attacks(square, occupied, deltas):
         target = square
         while True:
             target += delta
-            if not 0 <= target < 64 or square_distance(target, target - delta) > 2:
+            if (
+                not 0 <= target < 64
+                or square_distance(target, target - delta) > 2
+            ):
                 break
 
             attacks |= BB_SQUARES[target]
@@ -155,8 +169,7 @@ BB_KNIGHT_ATTACKS = [
     for square in range(64)
 ]
 BB_KING_ATTACKS = [
-    _step_attacks(square, [9, 8, 7, 1, -9, -8, -7, -1])
-    for square in range(64)
+    _step_attacks(square, [9, 8, 7, 1, -9, -8, -7, -1]) for square in range(64)
 ]
 BB_PAWN_ATTACKS = [
     [_step_attacks(square, deltas) for square in range(64)]
@@ -165,9 +178,8 @@ BB_PAWN_ATTACKS = [
 
 
 def _edges(square):
-    return (
-        ((BB_RANK_1 | BB_RANK_8) & ~BB_RANKS[square_rank(square)])
-        | ((BB_FILE_A | BB_FILE_H) & ~BB_FILES[square_file(square)])
+    return ((BB_RANK_1 | BB_RANK_8) & ~BB_RANKS[square_rank(square)]) | (
+        (BB_FILE_A | BB_FILE_H) & ~BB_FILES[square_file(square)]
     )
 
 
@@ -207,7 +219,11 @@ def _build_rays():
         row = []
         for b, bb_b in enumerate(BB_SQUARES):
             if BB_DIAG_ATTACKS[a][0] & bb_b:
-                row.append((BB_DIAG_ATTACKS[a][0] & BB_DIAG_ATTACKS[b][0]) | bb_a | bb_b)
+                row.append(
+                    (BB_DIAG_ATTACKS[a][0] & BB_DIAG_ATTACKS[b][0])
+                    | bb_a
+                    | bb_b
+                )
             elif BB_RANK_ATTACKS[a][0] & bb_b:
                 row.append(BB_RANK_ATTACKS[a][0] | bb_a)
             elif BB_FILE_ATTACKS[a][0] & bb_b:

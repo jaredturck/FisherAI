@@ -11,16 +11,11 @@ from fisher_ai.generation import WindowGenerator
 from fisher_ai.network import FisherNetwork
 from fisher_ai.trainer import AlphaZeroTrainer
 
-
-def ensure_checkpoint(config):
-    manager = CheckpointManager(config.runtime.checkpoint_dir)
-    path = manager.latest_path()
-    if path is None:
-        path = manager.save(FisherNetwork(config.network), config, 0)
-    return manager, path
+DEFAULT_BENCHMARK_POSITIONS = 5000
+BENCHMARK_DIR = Path("benchmarks")
 
 
-def write_reports(output_dir, positions, generation, training):
+def write_reports(output_dir, window_positions, generation, training):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = output_dir / "benchmark_results.csv"
@@ -29,91 +24,95 @@ def write_reports(output_dir, positions, generation, training):
     rows = [
         {
             "phase": "generation",
-            "positions": positions,
-            "elapsed_seconds": generation["elapsed_seconds"],
+            "positions": window_positions,
+            "seconds": generation["elapsed_seconds"],
             "positions_per_second": generation["positions_per_second"],
             "evaluations_per_second": generation["evaluations_per_second"],
-            "average_inference_batch": generation["average_inference_batch"],
-            "maximum_inference_batch": generation["max_batch"],
             "optimizer_steps": "",
-            "loss": "",
         },
         {
             "phase": "training",
-            "positions": positions,
-            "elapsed_seconds": training["elapsed_seconds"],
+            "positions": training["positions"],
+            "seconds": training["elapsed_seconds"],
             "positions_per_second": training["positions_per_second"],
             "evaluations_per_second": "",
-            "average_inference_batch": "",
-            "maximum_inference_batch": "",
             "optimizer_steps": training["optimizer_steps"],
-            "loss": training["loss"],
         },
     ]
-
     with csv_path.open("w", newline="") as file:
-        writer = csv.DictWriter(file, fieldnames=rows[0].keys())
+        writer = csv.DictWriter(file, fieldnames=rows[0])
         writer.writeheader()
         writer.writerows(rows)
 
     total_seconds = generation["elapsed_seconds"] + training["elapsed_seconds"]
+    generation_percent = generation["elapsed_seconds"] / total_seconds * 100
+    training_percent = training["elapsed_seconds"] / total_seconds * 100
     lines = [
-        "# Fisher AI Phased Benchmark",
+        "# Fisher AI Benchmark",
         "",
         f"Generated at: {datetime.now().isoformat(timespec='seconds')}",
-        f"Window positions: {positions:,}",
+        f"Window positions: {window_positions:,}",
+        f"Training epochs: {training['epochs']}",
         "",
-        "| Phase | Seconds | Positions/s | Other |",
+        "| Phase | Seconds | Positions/s | Share |",
         "|---|---:|---:|---:|",
-        f"| Generation | {generation['elapsed_seconds']:.3f} | "
-        f"{generation['positions_per_second']:.2f} | "
-        f"{generation['evaluations_per_second']:.2f} evals/s |",
-        f"| Training | {training['elapsed_seconds']:.3f} | "
-        f"{training['positions_per_second']:.2f} | "
-        f"{training['optimizer_steps']} optimizer steps |",
-        f"| Total | {total_seconds:.3f} | {positions / max(total_seconds, 1e-6):.2f} | |",
+        (
+            f"| Generation | {generation['elapsed_seconds']:.3f} | "
+            f"{generation['positions_per_second']:.2f} | "
+            f"{generation_percent:.1f}% |"
+        ),
+        (
+            f"| Training | {training['elapsed_seconds']:.3f} | "
+            f"{training['positions_per_second']:.2f} | "
+            f"{training_percent:.1f}% |"
+        ),
+        f"| Total | {total_seconds:.3f} | | 100.0% |",
         "",
-        f"Peak compact window memory: {generation['memory_bytes'] / (1024 ** 2):.2f} MiB",
-        f"Average inference batch: {generation['average_inference_batch']:.2f}",
+        f"Games completed: {generation['games']:,}",
+        f"Neural evaluations/s: {generation['evaluations_per_second']:.2f}",
+        (
+            "Average inference batch: "
+            f"{generation['average_inference_batch']:.2f}"
+        ),
         f"Maximum inference batch: {generation['max_batch']}",
-        f"Final benchmark loss: {training['loss']:.6f}",
+        f"Optimizer steps: {training['optimizer_steps']:,}",
     ]
     markdown_path.write_text("\n".join(lines) + "\n")
     return csv_path, markdown_path
 
 
-def run_benchmark(config_path="fisher_config.json", positions=None, output_dir=None):
+def run_benchmark(
+    config_path="fisher_config.json",
+    positions=None,
+    output_dir=BENCHMARK_DIR,
+):
     config = load_config(config_path)
-    positions = positions or config.runtime.benchmark_positions
-    manager, checkpoint_path = ensure_checkpoint(config)
+    positions = positions or DEFAULT_BENCHMARK_POSITIONS
+    manager = CheckpointManager()
+    checkpoint_path = manager.ensure(FisherNetwork())
 
     generator = WindowGenerator(
         config_path=config_path,
         checkpoint_path=checkpoint_path,
     )
-    window, generation_metrics = generator.generate(positions)
+    window, generation = generator.generate(positions)
     del generator
     gc.collect()
 
-    model = FisherNetwork(config.network)
+    model = FisherNetwork()
     trainer = AlphaZeroTrainer(
         model,
-        config,
-        device=available_device(config.runtime.device),
+        config.batch_size,
+        device=available_device(config.device),
         checkpoint_manager=manager,
     )
     trainer.load_checkpoint(checkpoint_path)
-    training_metrics = trainer.train_window(window, epochs=1)
-
-    if output_dir is None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = Path(config.runtime.benchmark_dir) / timestamp
-
+    training = trainer.train_window(window)
     csv_path, markdown_path = write_reports(
         output_dir,
         window.position_count,
-        generation_metrics,
-        training_metrics,
+        generation,
+        training,
     )
 
     del trainer
@@ -122,7 +121,11 @@ def run_benchmark(config_path="fisher_config.json", positions=None, output_dir=N
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    return {
-        "generation": generation_metrics,
-        "training": training_metrics,
-    }, csv_path, markdown_path
+    return (
+        {
+            "generation": generation,
+            "training": training,
+        },
+        csv_path,
+        markdown_path,
+    )

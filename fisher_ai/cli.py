@@ -3,12 +3,11 @@ import argparse
 import torch
 
 from fisher_ai.benchmark import run_benchmark
-from fisher_ai.pipeline import PhasedTrainingPipeline
+from fisher_ai.pipeline import TrainingPipeline
 
 
-def command_workstation(args):
-    pipeline = PhasedTrainingPipeline(args.config)
-    pipeline.run(iterations=args.iterations)
+def command_train(args):
+    TrainingPipeline(args.config).run(iterations=args.iterations)
 
 
 def command_benchmark(args):
@@ -17,9 +16,13 @@ def command_benchmark(args):
         positions=args.positions,
     )
     print(
-        f"Generation: {results['generation']['positions_per_second']:.2f} positions/s"
+        f"Generation: "
+        f"{results['generation']['positions_per_second']:.2f} positions/s"
     )
-    print(f"Training: {results['training']['positions_per_second']:.2f} positions/s")
+    print(
+        f"Training: "
+        f"{results['training']['positions_per_second']:.2f} positions/s"
+    )
     print(f"CSV: {csv_path}")
     print(f"Summary: {markdown_path}")
 
@@ -34,17 +37,17 @@ def build_parser():
     parser = argparse.ArgumentParser(prog="python -m fisher_ai")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    workstation_parser = subparsers.add_parser(
-        "workstation",
-        help="run phased self-play generation and full-window training",
+    train_parser = subparsers.add_parser(
+        "train",
+        help="generate a window, train for three epochs, and repeat",
     )
-    workstation_parser.add_argument("--config", default="fisher_config.json")
-    workstation_parser.add_argument("--iterations", type=int)
-    workstation_parser.set_defaults(handler=command_workstation)
+    train_parser.add_argument("--config", default="fisher_config.json")
+    train_parser.add_argument("--iterations", type=int)
+    train_parser.set_defaults(handler=command_train)
 
     benchmark_parser = subparsers.add_parser(
         "benchmark",
-        help="benchmark generation and training as separate phases",
+        help="benchmark generation and training",
     )
     benchmark_parser.add_argument("--config", default="fisher_config.json")
     benchmark_parser.add_argument("--positions", type=int)
@@ -55,7 +58,6 @@ def build_parser():
         help="play against the latest checkpoint",
     )
     gui_parser.set_defaults(handler=command_gui)
-
     return parser
 
 

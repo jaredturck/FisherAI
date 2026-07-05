@@ -1,21 +1,13 @@
 import numpy as np
 
 from fisher_ai import chess
+from fisher_ai.game import MAX_GAME_PLIES
 
 INPUT_PLANES = 119
 ACTION_PLANES = 73
 ACTION_SIZE = 64 * ACTION_PLANES
 
-PIECE_TYPES = [
-    chess.PAWN,
-    chess.KNIGHT,
-    chess.BISHOP,
-    chess.ROOK,
-    chess.QUEEN,
-    chess.KING,
-]
-
-QUEEN_DIRECTIONS = [
+QUEEN_DIRECTIONS = (
     (1, 0),
     (1, 1),
     (0, 1),
@@ -24,9 +16,8 @@ QUEEN_DIRECTIONS = [
     (-1, -1),
     (0, -1),
     (1, -1),
-]
-
-KNIGHT_DIRECTIONS = [
+)
+KNIGHT_DIRECTIONS = (
     (2, 1),
     (1, 2),
     (-1, 2),
@@ -35,9 +26,8 @@ KNIGHT_DIRECTIONS = [
     (-1, -2),
     (1, -2),
     (2, -1),
-]
-
-UNDERPROMOTION_PIECES = [chess.KNIGHT, chess.BISHOP, chess.ROOK]
+)
+UNDERPROMOTION_PIECES = (chess.KNIGHT, chess.BISHOP, chess.ROOK)
 
 
 def canonical_square(square, current_color):
@@ -68,7 +58,6 @@ def encode_history(
     snapshots,
     current_color,
     ply,
-    max_game_plies,
     castling_mask,
     halfmove_clock,
     output=None,
@@ -88,8 +77,12 @@ def encode_history(
         if current_color == chess.WHITE:
             output[plane_offset : plane_offset + 12] = piece_planes
         else:
-            output[plane_offset : plane_offset + 6] = piece_planes[6:12, ::-1, ::-1]
-            output[plane_offset + 6 : plane_offset + 12] = piece_planes[0:6, ::-1, ::-1]
+            output[plane_offset : plane_offset + 6] = piece_planes[
+                6:12, ::-1, ::-1
+            ]
+            output[plane_offset + 6 : plane_offset + 12] = piece_planes[
+                0:6, ::-1, ::-1
+            ]
 
         if snapshot.repetition_count >= 2:
             output[plane_offset + 12].fill(1.0)
@@ -97,7 +90,7 @@ def encode_history(
             output[plane_offset + 13].fill(1.0)
 
     output[112].fill(1.0 if current_color == chess.WHITE else 0.0)
-    output[113].fill(min(ply, max_game_plies) / max_game_plies)
+    output[113].fill(min(ply, MAX_GAME_PLIES) / MAX_GAME_PLIES)
 
     if current_color == chess.WHITE:
         own_kingside = castling_mask & 1
@@ -123,7 +116,6 @@ def encode_state(state):
         state.history,
         state.board.turn,
         state.board.ply(),
-        state.max_game_plies,
         castling_rights_mask(state.board),
         state.board.halfmove_clock,
     )
@@ -155,27 +147,3 @@ def move_to_action(move, current_color):
     assert 1 <= distance <= 7
     move_plane = QUEEN_DIRECTIONS.index(direction) * 7 + distance - 1
     return move_plane * 64 + from_square
-
-
-def legal_action_map(state):
-    mapping = {}
-    for move in state.board.legal_moves:
-        action = move_to_action(move, state.board.turn)
-        assert action not in mapping
-        mapping[action] = move
-    return mapping
-
-
-def legal_actions(state):
-    return np.asarray(sorted(legal_action_map(state)), dtype=np.int64)
-
-
-def policy_from_visits(root):
-    actions = root.child_actions.astype(np.int64, copy=True)
-    visits = root.child_visits.astype(np.float32, copy=True)
-    total = visits.sum()
-    if total == 0:
-        visits.fill(1.0 / len(visits))
-    else:
-        visits /= total
-    return actions, visits

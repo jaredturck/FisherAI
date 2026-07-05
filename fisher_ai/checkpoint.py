@@ -1,72 +1,49 @@
-import json
 import os
 from pathlib import Path
 
 import torch
 
-from fisher_ai.config import config_to_dict
-
 
 class CheckpointManager:
-    def __init__(self, directory, keep_recent=10):
+    def __init__(self, directory="checkpoints"):
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
-        self.latest_file = self.directory / "latest.json"
-        self.keep_recent = keep_recent
+        self.path = self.directory / "latest.pt"
+        self.pending_path = self.directory / "latest.pending.pt"
 
-    def checkpoint_path(self, step):
-        return self.directory / f"fisher_ai_{step:09d}.pt"
+    def latest_path(self):
+        return self.path if self.path.exists() else None
 
-    def save(self, model, config, step, optimizer=None, scaler=None, extra=None):
-        path = self.checkpoint_path(step)
-        pending_path = path.with_suffix(".pending.pt")
+    def ensure(self, model):
+        if not self.path.exists():
+            self.save(model, 0)
+        return self.path
+
+    def save(self, model, step, optimizer=None, scaler=None):
         payload = {
             "model": model.state_dict(),
-            "config": config_to_dict(config),
             "step": int(step),
-            "extra": extra or {},
         }
-
         if optimizer is not None:
             payload["optimizer"] = optimizer.state_dict()
         if scaler is not None:
             payload["scaler"] = scaler.state_dict()
 
-        torch.save(payload, pending_path)
-        os.replace(pending_path, path)
-        latest = {"path": path.name, "step": int(step)}
-        pending_file = self.directory / "latest.pending"
-        pending_file.write_text(json.dumps(latest, indent=2) + "\n")
-        os.replace(pending_file, self.latest_file)
-        self.prune()
-        return path
+        torch.save(payload, self.pending_path)
+        os.replace(self.pending_path, self.path)
+        return self.path
 
-    def prune(self):
-        candidates = sorted(self.directory.glob("fisher_ai_*.pt"))
-        for path in candidates[: -self.keep_recent]:
-            path.unlink()
-
-    def latest_path(self):
-        if self.latest_file.exists():
-            data = json.loads(self.latest_file.read_text())
-            path = self.directory / data["path"]
-            if path.exists():
-                return path
-
-        candidates = sorted(self.directory.glob("fisher_ai_*.pt"))
-        return candidates[-1] if candidates else None
-
-    def load(self, model, path=None, optimizer=None, scaler=None, device="cpu"):
+    def load(
+        self, model, path=None, optimizer=None, scaler=None, device="cpu"
+    ):
         path = Path(path) if path else self.latest_path()
         if path is None:
-            return 0, {}
+            return 0
 
         payload = torch.load(path, map_location=device, weights_only=False)
         model.load_state_dict(payload["model"])
-
         if optimizer is not None and "optimizer" in payload:
             optimizer.load_state_dict(payload["optimizer"])
         if scaler is not None and "scaler" in payload:
             scaler.load_state_dict(payload["scaler"])
-
-        return int(payload.get("step", 0)), payload.get("extra", {})
+        return int(payload.get("step", 0))

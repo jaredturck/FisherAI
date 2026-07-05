@@ -1,27 +1,29 @@
-from pathlib import Path
-
-import torch
-
-from fisher_ai.config import FisherConfig, save_config
-from fisher_ai.dataset import InMemoryWindow
-from fisher_ai.pipeline import PhasedTrainingPipeline
+from fisher_ai.pipeline import TrainingPipeline
 
 
-def test_pipeline_generates_then_trains_then_saves(monkeypatch, tmp_path):
-    config = FisherConfig()
-    config.runtime.checkpoint_dir = str(tmp_path / "checkpoints")
-    config.runtime.device = "cpu"
-    config.training.window_positions = 4
+def test_pipeline_generates_trains_saves_and_notifies(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
     config_path = tmp_path / "config.json"
-    save_config(config, config_path)
+    config_path.write_text(
+        """
+        {
+          "device": "cpu",
+          "actor_processes": 1,
+          "games_per_actor": 1,
+          "inference_batch_size": 1,
+          "inference_max_batch_size": 1,
+          "inference_batch_wait_ms": 1.0,
+          "simulations": 1,
+          "parallel_searches": 1,
+          "window_positions": 4,
+          "batch_size": 2
+        }
+        """
+    )
     calls = []
 
-    class Notifier:
-        def send(self, *args, **kwargs):
-            calls.append("notify")
-
-        def close(self):
-            calls.append("close")
+    class Window:
+        position_count = 4
 
     class Generator:
         def __init__(self, **kwargs):
@@ -29,46 +31,40 @@ def test_pipeline_generates_then_trains_then_saves(monkeypatch, tmp_path):
 
         def generate(self, target_positions):
             calls.append(("generate", target_positions))
-            window = InMemoryWindow(target_positions)
-            window.position_count = target_positions
-            return window, {
-                "games": 2,
+            return Window(), {
                 "elapsed_seconds": 1.0,
                 "positions_per_second": 4.0,
             }
 
     class Trainer:
-        def __init__(self, model, config, device, checkpoint_manager):
-            calls.append(("trainer_init", device))
-            self.step = 0
+        def __init__(self, model, batch_size, device, checkpoint_manager):
+            calls.append(("trainer_init", batch_size, device))
 
         def load_checkpoint(self, path):
-            calls.append(("load", Path(path).name))
+            calls.append("load")
 
         def train_window(self, window):
             calls.append(("train", window.position_count))
             return {
                 "elapsed_seconds": 2.0,
-                "positions_per_second": 2.0,
+                "positions_per_second": 6.0,
+                "epochs": 3,
             }
 
-        def save_checkpoint(self, extra):
-            calls.append(("save", extra["iteration"]))
-            return tmp_path / "checkpoints" / "fisher_ai_000000001.pt"
+        def save_checkpoint(self):
+            calls.append("save")
 
-    monkeypatch.setattr("fisher_ai.pipeline.DiscordNotifier", Notifier)
+    class Notifier:
+        def send_iteration(self, *args):
+            calls.append("notify")
+
     monkeypatch.setattr("fisher_ai.pipeline.WindowGenerator", Generator)
     monkeypatch.setattr("fisher_ai.pipeline.AlphaZeroTrainer", Trainer)
+    monkeypatch.setattr("fisher_ai.pipeline.DiscordNotifier", Notifier)
 
-    pipeline = PhasedTrainingPipeline(config_path)
-    result = pipeline.run_iteration()
+    pipeline = TrainingPipeline(config_path)
+    pipeline.run_iteration(1)
 
     assert calls.index(("generate", 4)) < calls.index(("train", 4))
-    assert calls.index(("train", 4)) < calls.index(("save", 1))
-    assert result["iteration"] == 1
-    payload = torch.load(
-        pipeline.manager.latest_path(),
-        map_location="cpu",
-        weights_only=False,
-    )
-    assert payload["step"] == 0
+    assert calls.index(("train", 4)) < calls.index("save")
+    assert calls.index("save") < calls.index("notify")

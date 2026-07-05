@@ -2,6 +2,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+INPUT_PLANES = 119
+CHANNELS = 128
+RESIDUAL_BLOCKS = 10
+SQUEEZE_EXCITATION_CHANNELS = 32
+POLICY_CHANNELS = 128
+VALUE_CHANNELS = 8
+VALUE_HIDDEN = 128
+
 
 class SqueezeExcitation(nn.Module):
     def __init__(self, channels, hidden_channels):
@@ -20,7 +28,7 @@ class SqueezeExcitation(nn.Module):
 
 
 class ResidualBlock(nn.Module):
-    def __init__(self, channels, squeeze_excitation_channels):
+    def __init__(self, channels):
         super().__init__()
         self.conv1 = nn.Conv2d(channels, channels, 3, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(channels)
@@ -28,7 +36,7 @@ class ResidualBlock(nn.Module):
         self.bn2 = nn.BatchNorm2d(channels)
         self.squeeze_excitation = SqueezeExcitation(
             channels,
-            squeeze_excitation_channels,
+            SQUEEZE_EXCITATION_CHANNELS,
         )
 
     def forward(self, x):
@@ -40,28 +48,38 @@ class ResidualBlock(nn.Module):
 
 
 class FisherNetwork(nn.Module):
-    def __init__(self, config):
+    def __init__(self):
         super().__init__()
-        channels = config.channels
-
-        self.stem_conv = nn.Conv2d(config.input_planes, channels, 3, padding=1, bias=False)
-        self.stem_bn = nn.BatchNorm2d(channels)
+        self.stem_conv = nn.Conv2d(
+            INPUT_PLANES,
+            CHANNELS,
+            3,
+            padding=1,
+            bias=False,
+        )
+        self.stem_bn = nn.BatchNorm2d(CHANNELS)
         self.residual_tower = nn.Sequential(
-            *[
-                ResidualBlock(channels, config.squeeze_excitation_channels)
-                for _ in range(config.residual_blocks)
-            ]
+            *[ResidualBlock(CHANNELS) for _ in range(RESIDUAL_BLOCKS)]
         )
 
-        self.policy_conv1 = nn.Conv2d(channels, config.policy_channels, 1, bias=False)
-        self.policy_bn = nn.BatchNorm2d(config.policy_channels)
-        self.policy_conv2 = nn.Conv2d(config.policy_channels, 73, 1)
+        self.policy_conv1 = nn.Conv2d(
+            CHANNELS,
+            POLICY_CHANNELS,
+            1,
+            bias=False,
+        )
+        self.policy_bn = nn.BatchNorm2d(POLICY_CHANNELS)
+        self.policy_conv2 = nn.Conv2d(POLICY_CHANNELS, 73, 1)
 
-        self.value_conv = nn.Conv2d(channels, config.value_channels, 1, bias=False)
-        self.value_bn = nn.BatchNorm2d(config.value_channels)
-        self.value_linear1 = nn.Linear(config.value_channels * 8 * 8, config.value_hidden)
-        self.value_linear2 = nn.Linear(config.value_hidden, 1)
-
+        self.value_conv = nn.Conv2d(
+            CHANNELS,
+            VALUE_CHANNELS,
+            1,
+            bias=False,
+        )
+        self.value_bn = nn.BatchNorm2d(VALUE_CHANNELS)
+        self.value_linear1 = nn.Linear(VALUE_CHANNELS * 8 * 8, VALUE_HIDDEN)
+        self.value_linear2 = nn.Linear(VALUE_HIDDEN, 1)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -95,8 +113,4 @@ class FisherNetwork(nn.Module):
         value = value.flatten(1)
         value = F.relu(self.value_linear1(value))
         value = torch.tanh(self.value_linear2(value)).squeeze(1)
-
         return policy, value
-
-    def parameter_count(self):
-        return sum(parameter.numel() for parameter in self.parameters())

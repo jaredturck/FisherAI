@@ -1,25 +1,25 @@
-import json
-
+import torch
 import torch.nn as nn
 
 from fisher_ai.checkpoint import CheckpointManager
-from fisher_ai.config import FisherConfig
 
 
-def test_checkpoint_manager_keeps_only_newest_files(tmp_path):
-    manager = CheckpointManager(tmp_path, keep_recent=3)
+def test_checkpoint_manager_overwrites_one_atomic_checkpoint(tmp_path):
+    manager = CheckpointManager(tmp_path)
     model = nn.Linear(1, 1)
-    config = FisherConfig()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
 
-    for step in range(5):
-        manager.save(model, config, step)
+    manager.save(model, 4, optimizer=optimizer)
+    manager.save(model, 5, optimizer=optimizer)
 
-    checkpoints = sorted(path.name for path in tmp_path.glob("fisher_ai_*.pt"))
-    latest = json.loads((tmp_path / "latest.json").read_text())
+    assert manager.latest_path() == tmp_path / "latest.pt"
+    assert not (tmp_path / "latest.pending.pt").exists()
+    assert list(tmp_path.glob("*.pt")) == [tmp_path / "latest.pt"]
 
-    assert checkpoints == [
-        "fisher_ai_000000002.pt",
-        "fisher_ai_000000003.pt",
-        "fisher_ai_000000004.pt",
-    ]
-    assert latest == {"path": "fisher_ai_000000004.pt", "step": 4}
+    payload = torch.load(
+        manager.latest_path(),
+        map_location="cpu",
+        weights_only=False,
+    )
+    assert set(payload) == {"model", "optimizer", "step"}
+    assert payload["step"] == 5

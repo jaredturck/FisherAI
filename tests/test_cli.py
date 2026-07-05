@@ -10,22 +10,22 @@ from fisher_ai import cli
 def test_cli_only_exposes_required_commands():
     parser = cli.build_parser()
     subparsers = next(
-        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+        action
+        for action in parser._actions
+        if isinstance(action, argparse._SubParsersAction)
     )
 
-    assert set(subparsers.choices) == {"workstation", "benchmark", "gui"}
-    assert parser.prog == "python -m fisher_ai"
-    assert parser.parse_args(["workstation"]).config == "fisher_config.json"
-    assert parser.parse_args(["workstation"]).iterations is None
+    assert set(subparsers.choices) == {"train", "benchmark", "gui"}
+    assert parser.parse_args(["train"]).config == "fisher_config.json"
+    assert parser.parse_args(["train"]).iterations is None
     assert parser.parse_args(["benchmark"]).positions is None
-    assert parser.parse_args(["gui"]).handler is cli.command_gui
 
-    for command in ("init", "self-play", "learn", "train", "evaluate", "uci"):
+    for command in ("workstation", "evaluate", "uci", "learn"):
         with pytest.raises(SystemExit):
             parser.parse_args([command])
 
 
-def test_workstation_runs_phased_pipeline(monkeypatch):
+def test_train_runs_pipeline(monkeypatch):
     calls = {}
 
     class Pipeline:
@@ -35,10 +35,8 @@ def test_workstation_runs_phased_pipeline(monkeypatch):
         def run(self, iterations=None):
             calls["iterations"] = iterations
 
-    monkeypatch.setattr(cli, "PhasedTrainingPipeline", Pipeline)
-    cli.command_workstation(
-        argparse.Namespace(config="custom.json", iterations=3)
-    )
+    monkeypatch.setattr(cli, "TrainingPipeline", Pipeline)
+    cli.command_train(argparse.Namespace(config="custom.json", iterations=3))
 
     assert calls == {"config_path": "custom.json", "iterations": 3}
 

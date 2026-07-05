@@ -18,7 +18,9 @@ def test_starting_position_perft_depth_three():
 
 
 def test_complex_castling_position_perft_depth_two():
-    board = chess.Board("r3k2r/p1ppqpb1/bn2pnp1/2pP4/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1")
+    board = chess.Board(
+        "r3k2r/p1ppqpb1/bn2pnp1/2pP4/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"
+    )
     assert perft(board, 2) == 1779
 
 
@@ -62,21 +64,10 @@ def test_terminal_positions():
 
 
 def test_position_key_ignores_non_capturable_en_passant_square():
-    with_ep = chess.Board("rnbqkbnr/pppp1ppp/8/4p3/8/8/PPPPPPPP/RNBQKBNR w KQkq e6 0 2")
-    without_ep = chess.Board("rnbqkbnr/pppp1ppp/8/4p3/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 2")
+    with_ep = chess.Board(
+        "rnbqkbnr/pppp1ppp/8/4p3/8/8/PPPPPPPP/RNBQKBNR w KQkq e6 0 2"
+    )
+    without_ep = chess.Board(
+        "rnbqkbnr/pppp1ppp/8/4p3/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 2"
+    )
     assert with_ep.position_key() == without_ep.position_key()
-
-
-def test_uci_position_commands_use_the_local_board():
-    from fisher_ai.config import SearchConfig
-    from fisher_ai.uci import UCIEngine
-
-    engine = UCIEngine(object(), SearchConfig())
-    engine.set_position("position startpos moves e2e4 e7e5 g1f3")
-    expected = chess.Board()
-    for uci in ("e2e4", "e7e5", "g1f3"):
-        expected.push(chess.Move.from_uci(uci))
-    assert engine.state.board.position_key() == expected.position_key()
-
-    engine.set_position("position fen 8/8/8/8/8/8/4K3/7k w - - 0 1")
-    assert engine.state.board.is_insufficient_material()

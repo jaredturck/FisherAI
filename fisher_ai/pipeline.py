@@ -11,111 +11,60 @@ from fisher_ai.notifications import DiscordNotifier
 from fisher_ai.trainer import AlphaZeroTrainer
 
 
-class PhasedTrainingPipeline:
+class TrainingPipeline:
     def __init__(self, config_path="fisher_config.json"):
         self.config_path = str(Path(config_path).resolve())
         self.config = load_config(self.config_path)
-        self.device = available_device(self.config.runtime.device)
-        self.manager = CheckpointManager(self.config.runtime.checkpoint_dir)
+        self.device = available_device(self.config.device)
+        self.manager = CheckpointManager()
         self.notifier = DiscordNotifier()
-        self.ensure_checkpoint()
+        self.manager.ensure(FisherNetwork())
 
-    def ensure_checkpoint(self):
-        path = self.manager.latest_path()
-        if path is None:
-            path = self.manager.save(FisherNetwork(self.config.network), self.config, 0)
-        return path
-
-    def run_iteration(self):
-        checkpoint_path = self.ensure_checkpoint()
-        checkpoint_payload = torch.load(
-            checkpoint_path,
-            map_location="cpu",
-            weights_only=False,
-        )
-        checkpoint_extra = checkpoint_payload.get("extra", {})
-        iteration = int(checkpoint_extra.get("iteration", 0)) + 1
-        generated_games = int(checkpoint_extra.get("generated_games", 0))
-
+    def run_iteration(self, iteration):
+        checkpoint_path = self.manager.latest_path()
         print(
             f"Iteration {iteration}: generating "
-            f"{self.config.training.window_positions:,} positions",
+            f"{self.config.window_positions:,} positions",
             flush=True,
         )
         generator = WindowGenerator(
             config_path=self.config_path,
             checkpoint_path=checkpoint_path,
-            generated_game_offset=generated_games,
         )
-        window, generation_metrics = generator.generate(
-            self.config.training.window_positions
-        )
+        window, generation = generator.generate(self.config.window_positions)
         del generator
         gc.collect()
 
         print(
-            f"Iteration {iteration}: training on every position in the window",
+            f"Iteration {iteration}: training for three epochs",
             flush=True,
         )
-        model = FisherNetwork(self.config.network)
+        model = FisherNetwork()
         trainer = AlphaZeroTrainer(
             model,
-            self.config,
+            self.config.batch_size,
             device=self.device,
             checkpoint_manager=self.manager,
         )
         trainer.load_checkpoint(checkpoint_path)
-        training_metrics = trainer.train_window(window)
-        generated_games += generation_metrics["games"]
-        next_path = trainer.save_checkpoint(
-            {
-                "iteration": iteration,
-                "generated_games": generated_games,
-                "last_window_positions": window.position_count,
-                "last_generation_seconds": generation_metrics["elapsed_seconds"],
-                "last_training_seconds": training_metrics["elapsed_seconds"],
-            }
-        )
+        training = trainer.train_window(window)
+        trainer.save_checkpoint()
 
         print(
             f"Iteration {iteration} complete: "
-            f"generation={generation_metrics['elapsed_seconds']:.1f}s "
-            f"({generation_metrics['positions_per_second']:.1f} positions/s), "
-            f"training={training_metrics['elapsed_seconds']:.1f}s "
-            f"({training_metrics['positions_per_second']:.1f} positions/s), "
-            f"checkpoint={next_path.name}",
+            f"generation={generation['elapsed_seconds']:.1f}s "
+            f"({generation['positions_per_second']:.1f} positions/s), "
+            f"training={training['elapsed_seconds']:.1f}s "
+            f"({training['positions_per_second']:.1f} positions/s)",
             flush=True,
         )
-        self.notifier.send(
-            "Fisher AI iteration complete",
-            [
-                ("Iteration", f"{iteration:,}"),
-                ("Window positions", f"{window.position_count:,}"),
-                (
-                    "Generation",
-                    f"{generation_metrics['elapsed_seconds']:.1f}s • "
-                    f"{generation_metrics['positions_per_second']:.1f} positions/s",
-                    False,
-                ),
-                (
-                    "Training",
-                    f"{training_metrics['elapsed_seconds']:.1f}s • "
-                    f"{training_metrics['positions_per_second']:.1f} positions/s",
-                    False,
-                ),
-                ("Checkpoint", next_path.name, False),
-            ],
-            description="A complete generate-then-train iteration finished.",
-            color="green",
-            include_gpu_stats=True,
+        self.notifier.send_iteration(
+            iteration,
+            window.position_count,
+            generation,
+            training,
+            self.device,
         )
-
-        result = {
-            "iteration": iteration,
-            "checkpoint_path": next_path,
-            "generation": generation_metrics,
-            "training": training_metrics,
-        }
 
         del trainer
         del model
@@ -123,21 +72,12 @@ class PhasedTrainingPipeline:
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        return result
 
     def run(self, iterations=None):
-        configured_iterations = self.config.training.training_iterations
-        if iterations is None:
-            iterations = configured_iterations
-        completed = 0
-
+        iteration = 1
         try:
-            while iterations == 0 or completed < iterations:
-                self.run_iteration()
-                completed += 1
+            while iterations is None or iteration <= iterations:
+                self.run_iteration(iteration)
+                iteration += 1
         except KeyboardInterrupt:
-            print("Stopping after the current completed checkpoint", flush=True)
-        finally:
-            self.notifier.close()
-
-        return completed
+            print("Stopped after the last completed checkpoint", flush=True)

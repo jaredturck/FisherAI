@@ -124,8 +124,12 @@ class Board:
 
     def reset(self):
         self.pawns = BB_RANK_2 | BB_RANK_7
-        self.knights = BB_SQUARES[1] | BB_SQUARES[6] | BB_SQUARES[57] | BB_SQUARES[62]
-        self.bishops = BB_SQUARES[2] | BB_SQUARES[5] | BB_SQUARES[58] | BB_SQUARES[61]
+        self.knights = (
+            BB_SQUARES[1] | BB_SQUARES[6] | BB_SQUARES[57] | BB_SQUARES[62]
+        )
+        self.bishops = (
+            BB_SQUARES[2] | BB_SQUARES[5] | BB_SQUARES[58] | BB_SQUARES[61]
+        )
         self.rooks = BB_CORNERS
         self.queens = BB_SQUARES[3] | BB_SQUARES[59]
         self.kings = BB_E1 | BB_E8
@@ -270,10 +274,16 @@ class Board:
 
         attacks = BB_EMPTY
         if square_mask & (self.bishops | self.queens):
-            attacks |= BB_DIAG_ATTACKS[square][BB_DIAG_MASKS[square] & self.occupied]
+            attacks |= BB_DIAG_ATTACKS[square][
+                BB_DIAG_MASKS[square] & self.occupied
+            ]
         if square_mask & (self.rooks | self.queens):
-            attacks |= BB_RANK_ATTACKS[square][BB_RANK_MASKS[square] & self.occupied]
-            attacks |= BB_FILE_ATTACKS[square][BB_FILE_MASKS[square] & self.occupied]
+            attacks |= BB_RANK_ATTACKS[square][
+                BB_RANK_MASKS[square] & self.occupied
+            ]
+            attacks |= BB_FILE_ATTACKS[square][
+                BB_FILE_MASKS[square] & self.occupied
+            ]
         return attacks
 
     def attackers_mask(self, color, square, occupied=None):
@@ -316,7 +326,10 @@ class Board:
 
             snipers = rays & sliders & self.occupied_co[not color]
             for sniper in scan_reversed(snipers):
-                if between(sniper, king) & (self.occupied | square_mask) == square_mask:
+                if (
+                    between(sniper, king) & (self.occupied | square_mask)
+                    == square_mask
+                ):
                     return ray(king, sniper)
             break
 
@@ -324,7 +337,11 @@ class Board:
 
     def checkers_mask(self):
         king = self.king(self.turn)
-        return BB_EMPTY if king is None else self.attackers_mask(not self.turn, king)
+        return (
+            BB_EMPTY
+            if king is None
+            else self.attackers_mask(not self.turn, king)
+        )
 
     def is_check(self):
         return bool(self.checkers_mask())
@@ -362,10 +379,14 @@ class Board:
 
         if self.turn == WHITE:
             single_moves = pawns << 8 & ~self.occupied
-            double_moves = single_moves << 8 & ~self.occupied & (BB_RANK_3 | BB_RANK_4)
+            double_moves = (
+                single_moves << 8 & ~self.occupied & (BB_RANK_3 | BB_RANK_4)
+            )
         else:
             single_moves = pawns >> 8 & ~self.occupied
-            double_moves = single_moves >> 8 & ~self.occupied & (BB_RANK_6 | BB_RANK_5)
+            double_moves = (
+                single_moves >> 8 & ~self.occupied & (BB_RANK_6 | BB_RANK_5)
+            )
 
         for to_square in scan_reversed(single_moves & to_mask):
             from_square = to_square + (8 if self.turn == BLACK else -8)
@@ -412,26 +433,35 @@ class Board:
         blockers = BB_EMPTY
         for sniper in scan_reversed(snipers & self.occupied_co[not self.turn]):
             between_pieces = between(king, sniper) & self.occupied
-            if between_pieces and BB_SQUARES[msb(between_pieces)] == between_pieces:
+            if (
+                between_pieces
+                and BB_SQUARES[msb(between_pieces)] == between_pieces
+            ):
                 blockers |= between_pieces
         return blockers & self.occupied_co[self.turn]
 
     def _ep_skewered(self, king, capturer):
         last_double = self.ep_square + (-8 if self.turn == WHITE else 8)
         occupancy = (
-            self.occupied
-            & ~BB_SQUARES[last_double]
-            & ~BB_SQUARES[capturer]
+            self.occupied & ~BB_SQUARES[last_double] & ~BB_SQUARES[capturer]
             | BB_SQUARES[self.ep_square]
         )
 
-        horizontal_attackers = self.occupied_co[not self.turn] & (self.rooks | self.queens)
-        if BB_RANK_ATTACKS[king][BB_RANK_MASKS[king] & occupancy] & horizontal_attackers:
+        horizontal_attackers = self.occupied_co[not self.turn] & (
+            self.rooks | self.queens
+        )
+        if (
+            BB_RANK_ATTACKS[king][BB_RANK_MASKS[king] & occupancy]
+            & horizontal_attackers
+        ):
             return True
 
-        diagonal_attackers = self.occupied_co[not self.turn] & (self.bishops | self.queens)
+        diagonal_attackers = self.occupied_co[not self.turn] & (
+            self.bishops | self.queens
+        )
         return bool(
-            BB_DIAG_ATTACKS[king][BB_DIAG_MASKS[king] & occupancy] & diagonal_attackers
+            BB_DIAG_ATTACKS[king][BB_DIAG_MASKS[king] & occupancy]
+            & diagonal_attackers
         )
 
     def is_en_passant(self, move):
@@ -454,7 +484,8 @@ class Board:
 
         if self.is_en_passant(move):
             return bool(
-                self.pin_mask(self.turn, move.from_square) & BB_SQUARES[move.to_square]
+                self.pin_mask(self.turn, move.from_square)
+                & BB_SQUARES[move.to_square]
                 and not self._ep_skewered(king, move.from_square)
             )
 
@@ -463,7 +494,9 @@ class Board:
             or ray(move.from_square, move.to_square) & BB_SQUARES[king]
         )
 
-    def _generate_evasions(self, king, checkers, from_mask=BB_ALL, to_mask=BB_ALL):
+    def _generate_evasions(
+        self, king, checkers, from_mask=BB_ALL, to_mask=BB_ALL
+    ):
         sliders = checkers & (self.bishops | self.rooks | self.queens)
         attacked = BB_EMPTY
         for checker in scan_reversed(sliders):
@@ -484,9 +517,14 @@ class Board:
             return
 
         target = between(king, checker) | checkers
-        yield from self.generate_pseudo_legal_moves(~self.kings & from_mask, target & to_mask)
+        yield from self.generate_pseudo_legal_moves(
+            ~self.kings & from_mask, target & to_mask
+        )
 
-        if self.ep_square is not None and not BB_SQUARES[self.ep_square] & target:
+        if (
+            self.ep_square is not None
+            and not BB_SQUARES[self.ep_square] & target
+        ):
             last_double = self.ep_square + (-8 if self.turn == WHITE else 8)
             if last_double == checker:
                 yield from self.generate_pseudo_legal_ep(from_mask, to_mask)
@@ -525,17 +563,23 @@ class Board:
 
             if rights & BB_H1 and to_mask & BB_SQUARES[G1]:
                 empty_path = BB_SQUARES[F1] | BB_SQUARES[G1]
-                if not self.occupied & empty_path and not self._attacked_for_king(
-                    BB_E1 | BB_SQUARES[F1] | BB_SQUARES[G1],
-                    self.occupied ^ king_mask,
+                if (
+                    not self.occupied & empty_path
+                    and not self._attacked_for_king(
+                        BB_E1 | BB_SQUARES[F1] | BB_SQUARES[G1],
+                        self.occupied ^ king_mask,
+                    )
                 ):
                     yield Move(king_square, G1)
 
             if rights & BB_A1 and to_mask & BB_SQUARES[C1]:
                 empty_path = BB_SQUARES[B1] | BB_SQUARES[C1] | BB_SQUARES[D1]
-                if not self.occupied & empty_path and not self._attacked_for_king(
-                    BB_E1 | BB_SQUARES[D1] | BB_SQUARES[C1],
-                    self.occupied ^ king_mask,
+                if (
+                    not self.occupied & empty_path
+                    and not self._attacked_for_king(
+                        BB_E1 | BB_SQUARES[D1] | BB_SQUARES[C1],
+                        self.occupied ^ king_mask,
+                    )
                 ):
                     yield Move(king_square, C1)
         else:
@@ -546,17 +590,23 @@ class Board:
 
             if rights & BB_H8 and to_mask & BB_SQUARES[G8]:
                 empty_path = BB_SQUARES[F8] | BB_SQUARES[G8]
-                if not self.occupied & empty_path and not self._attacked_for_king(
-                    BB_E8 | BB_SQUARES[F8] | BB_SQUARES[G8],
-                    self.occupied ^ king_mask,
+                if (
+                    not self.occupied & empty_path
+                    and not self._attacked_for_king(
+                        BB_E8 | BB_SQUARES[F8] | BB_SQUARES[G8],
+                        self.occupied ^ king_mask,
+                    )
                 ):
                     yield Move(king_square, G8)
 
             if rights & BB_A8 and to_mask & BB_SQUARES[C8]:
                 empty_path = BB_SQUARES[B8] | BB_SQUARES[C8] | BB_SQUARES[D8]
-                if not self.occupied & empty_path and not self._attacked_for_king(
-                    BB_E8 | BB_SQUARES[D8] | BB_SQUARES[C8],
-                    self.occupied ^ king_mask,
+                if (
+                    not self.occupied & empty_path
+                    and not self._attacked_for_king(
+                        BB_E8 | BB_SQUARES[D8] | BB_SQUARES[C8],
+                        self.occupied ^ king_mask,
+                    )
                 ):
                     yield Move(king_square, C8)
 
@@ -572,17 +622,23 @@ class Board:
         return white_rights | black_rights
 
     def has_kingside_castling_rights(self, color):
-        return bool(self.clean_castling_rights() & (BB_H1 if color == WHITE else BB_H8))
+        return bool(
+            self.clean_castling_rights() & (BB_H1 if color == WHITE else BB_H8)
+        )
 
     def has_queenside_castling_rights(self, color):
-        return bool(self.clean_castling_rights() & (BB_A1 if color == WHITE else BB_A8))
+        return bool(
+            self.clean_castling_rights() & (BB_A1 if color == WHITE else BB_A8)
+        )
 
     def push(self, move):
         from_mask = BB_SQUARES[move.from_square]
         to_mask = BB_SQUARES[move.to_square]
         piece_type = self.piece_type_at(move.from_square)
         if piece_type is None:
-            raise ValueError(f"no piece at source square for move {move.uci()!r}")
+            raise ValueError(
+                f"no piece at source square for move {move.uci()!r}"
+            )
 
         ep_square = self.ep_square
         captured_piece_type = self.piece_type_at(move.to_square)
@@ -592,7 +648,9 @@ class Board:
         self.castling_rights = self.clean_castling_rights()
         self.castling_rights &= ~from_mask & ~to_mask
         if piece_type == KING:
-            self.castling_rights &= ~(BB_RANK_1 if self.turn == WHITE else BB_RANK_8)
+            self.castling_rights &= ~(
+                BB_RANK_1 if self.turn == WHITE else BB_RANK_8
+            )
 
         self.ep_square = None
         self.halfmove_clock += 1
@@ -650,7 +708,10 @@ class Board:
             )
 
         if self.occupied_co[color] & self.bishops:
-            same_color = not self.bishops & BB_DARK_SQUARES or not self.bishops & BB_LIGHT_SQUARES
+            same_color = (
+                not self.bishops & BB_DARK_SQUARES
+                or not self.bishops & BB_LIGHT_SQUARES
+            )
             return same_color and not self.pawns and not self.knights
 
         return True

@@ -94,7 +94,6 @@ class ChessGUI:
         self.state = None
         self.search = None
         self.checkpoint_step = 0
-        self.checkpoint_name = ""
         self.device = ""
         self.engine_simulations = 0
         self.selected_square = None
@@ -113,7 +112,9 @@ class ChessGUI:
 
     def load_background(self):
         background = pygame.image.load(BACKGROUND_PATH).convert()
-        return pygame.transform.smoothscale(background, (WINDOW_WIDTH, WINDOW_HEIGHT))
+        return pygame.transform.smoothscale(
+            background, (WINDOW_WIDTH, WINDOW_HEIGHT)
+        )
 
     def load_piece_sprites(self):
         sheet = pygame.image.load(SPRITE_PATH).convert_alpha()
@@ -128,18 +129,16 @@ class ChessGUI:
                 bottom = round((row + 1) * sheet_height / 2)
                 rect = pygame.Rect(left, top, right - left, bottom - top)
                 sprite = sheet.subsurface(rect).copy()
-                sprite = pygame.transform.smoothscale(sprite, (SQUARE_SIZE, SQUARE_SIZE))
+                sprite = pygame.transform.smoothscale(
+                    sprite, (SQUARE_SIZE, SQUARE_SIZE)
+                )
                 sprites[(color, piece_type)] = sprite
 
         return sprites
 
     def load_engine(self):
         config = load_config(CONFIG_PATH)
-        checkpoint_dir = Path(config.runtime.checkpoint_dir)
-        if not checkpoint_dir.is_absolute():
-            checkpoint_dir = ROOT_DIR / checkpoint_dir
-
-        manager = CheckpointManager(checkpoint_dir)
+        manager = CheckpointManager(ROOT_DIR / "checkpoints")
         checkpoint_path = manager.latest_path()
         if checkpoint_path is None:
             self.status = "No checkpoint found in checkpoints/"
@@ -147,29 +146,34 @@ class ChessGUI:
             pygame.display.flip()
             return
 
-        preferred_device = config.runtime.device
+        preferred_device = config.device
         self.device = available_device(preferred_device)
-        model = FisherNetwork(config.network)
-        self.checkpoint_step, _ = manager.load(model, path=checkpoint_path, device="cpu")
-        self.checkpoint_name = checkpoint_path.name
+        model = FisherNetwork()
+        self.checkpoint_step = manager.load(
+            model,
+            path=checkpoint_path,
+            device="cpu",
+        )
 
         evaluator = TorchEvaluator(
             model,
             device=self.device,
-            inference_batch_size=config.runtime.inference_batch_size,
-            channels_last=config.runtime.channels_last,
+            inference_batch_size=config.inference_batch_size,
         )
-        self.search = MCTS(evaluator, config.search, seed=config.runtime.seed + 1000)
-        self.engine_simulations = config.search.evaluation_simulations
-        self.max_game_plies = config.search.max_game_plies
+        self.search = MCTS(
+            evaluator,
+            simulations=config.simulations,
+            parallel_searches=config.parallel_searches,
+            seed=1007,
+        )
+        self.engine_simulations = config.simulations
         self.status = "Your move"
 
     def new_game(self):
         if self.engine_thinking:
             return
 
-        max_game_plies = getattr(self, "max_game_plies", 320)
-        self.state = GameState(max_game_plies=max_game_plies)
+        self.state = GameState()
         self.selected_square = None
         self.legal_destinations.clear()
         self.last_move = None
@@ -203,10 +207,17 @@ class ChessGUI:
         return color, piece_type
 
     def legal_moves_from(self, square):
-        return [move for move in self.state.board.legal_moves if move.from_square == square]
+        return [
+            move
+            for move in self.state.board.legal_moves
+            if move.from_square == square
+        ]
 
     def castling_rook_square(self, move):
-        if self.piece_at(move.from_square) != (self.state.board.turn, chess.KING):
+        if self.piece_at(move.from_square) != (
+            self.state.board.turn,
+            chess.KING,
+        ):
             return None
         if abs(move.to_square - move.from_square) != 2:
             return None
@@ -240,7 +251,11 @@ class ChessGUI:
         return candidates[0]
 
     def handle_board_click(self, position):
-        if self.search is None or self.engine_thinking or self.state.is_terminal():
+        if (
+            self.search is None
+            or self.engine_thinking
+            or self.state.is_terminal()
+        ):
             return
         if self.state.board.turn != HUMAN_COLOR:
             return
@@ -293,7 +308,9 @@ class ChessGUI:
         self.engine_thinking = True
         self.status = "FisherAI is thinking..."
         state = self.state.copy()
-        thread = threading.Thread(target=self.compute_engine_move, args=(state,), daemon=True)
+        thread = threading.Thread(
+            target=self.compute_engine_move, args=(state,), daemon=True
+        )
         thread.start()
 
     def compute_engine_move(self, state):
@@ -302,7 +319,6 @@ class ChessGUI:
             [state],
             roots=[root],
             add_noise=False,
-            simulations=self.engine_simulations,
         )[0]
         action = self.search.choose_action(root, greedy=True)
         self.engine_results.put(root.move_for_action(action))
@@ -317,12 +333,20 @@ class ChessGUI:
 
     def update_status(self):
         if self.state.board.is_checkmate():
-            winner = "You win" if self.state.board.turn == ENGINE_COLOR else "FisherAI wins"
+            winner = (
+                "You win"
+                if self.state.board.turn == ENGINE_COLOR
+                else "FisherAI wins"
+            )
             self.status = f"Checkmate — {winner}"
         elif self.state.is_terminal():
             self.status = "Draw"
         elif self.state.board.is_check():
-            self.status = "Check — your move" if self.state.board.turn == HUMAN_COLOR else "Check"
+            self.status = (
+                "Check — your move"
+                if self.state.board.turn == HUMAN_COLOR
+                else "Check"
+            )
         elif self.state.board.turn == HUMAN_COLOR:
             self.status = "Your move"
         else:
@@ -343,7 +367,9 @@ class ChessGUI:
                 square = column + (7 - row) * 8
                 x = BOARD_X + column * SQUARE_SIZE
                 y = BOARD_Y + row * SQUARE_SIZE
-                color = LIGHT_SQUARE if (row + column) % 2 == 0 else DARK_SQUARE
+                color = (
+                    LIGHT_SQUARE if (row + column) % 2 == 0 else DARK_SQUARE
+                )
 
                 if self.last_move and square in (
                     self.last_move.from_square,
@@ -355,7 +381,9 @@ class ChessGUI:
                 if square == check_square:
                     color = CHECK_SQUARE
 
-                surface = pygame.Surface((SQUARE_SIZE, SQUARE_SIZE), pygame.SRCALPHA)
+                surface = pygame.Surface(
+                    (SQUARE_SIZE, SQUARE_SIZE), pygame.SRCALPHA
+                )
                 surface.fill(color)
                 self.screen.blit(surface, (x, y))
 
@@ -375,7 +403,9 @@ class ChessGUI:
         pygame.draw.rect(
             self.screen,
             (214, 176, 92),
-            pygame.Rect(BOARD_X - 3, BOARD_Y - 3, BOARD_SIZE + 6, BOARD_SIZE + 6),
+            pygame.Rect(
+                BOARD_X - 3, BOARD_Y - 3, BOARD_SIZE + 6, BOARD_SIZE + 6
+            ),
             width=3,
             border_radius=3,
         )
@@ -386,7 +416,9 @@ class ChessGUI:
         center = (x + SQUARE_SIZE // 2, y + SQUARE_SIZE // 2)
 
         if occupied:
-            pygame.draw.circle(self.screen, LEGAL_MOVE, center, SQUARE_SIZE // 2 - 8, width=6)
+            pygame.draw.circle(
+                self.screen, LEGAL_MOVE, center, SQUARE_SIZE // 2 - 8, width=6
+            )
         else:
             pygame.draw.circle(self.screen, LEGAL_MOVE, center, 11)
 
@@ -400,11 +432,15 @@ class ChessGUI:
         for row in range(8):
             rank = str(8 - row)
             text = self.coordinate_font.render(rank, True, TEXT_COLOR)
-            self.screen.blit(text, (BOARD_X + 5, BOARD_Y + row * SQUARE_SIZE + 4))
+            self.screen.blit(
+                text, (BOARD_X + 5, BOARD_Y + row * SQUARE_SIZE + 4)
+            )
 
     def draw_panel(self):
         panel = pygame.Surface((PANEL_WIDTH, BOARD_SIZE), pygame.SRCALPHA)
-        pygame.draw.rect(panel, PANEL_COLOR, panel.get_rect(), border_radius=PANEL_RADIUS)
+        pygame.draw.rect(
+            panel, PANEL_COLOR, panel.get_rect(), border_radius=PANEL_RADIUS
+        )
         self.screen.blit(panel, (PANEL_X, BOARD_Y))
 
         content_x = PANEL_X + PANEL_PADDING
@@ -470,7 +506,11 @@ class ChessGUI:
         for offset in range(0, len(visible_moves), 2):
             move_number = (start_index + offset) // 2 + 1
             white_move = visible_moves[offset]
-            black_move = visible_moves[offset + 1] if offset + 1 < len(visible_moves) else ""
+            black_move = (
+                visible_moves[offset + 1]
+                if offset + 1 < len(visible_moves)
+                else ""
+            )
             line = f"{move_number:>3}.  {white_move:<6} {black_move}"
             self.draw_text(
                 line,

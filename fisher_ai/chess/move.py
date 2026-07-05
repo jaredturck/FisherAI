@@ -15,7 +15,9 @@ PROMOTION_FROM_SYMBOL = {
     "r": ROOK,
     "q": QUEEN,
 }
-PROMOTION_TO_SYMBOL = {value: key for key, value in PROMOTION_FROM_SYMBOL.items()}
+PROMOTION_TO_SYMBOL = {
+    value: key for key, value in PROMOTION_FROM_SYMBOL.items()
+}
 
 
 class Move:
@@ -57,7 +59,9 @@ class Move:
         from_square = parse_square(uci[:2])
         to_square = parse_square(uci[2:4])
         if from_square == to_square:
-            raise ValueError(f"source and destination squares are identical: {uci!r}")
+            raise ValueError(
+                f"source and destination squares are identical: {uci!r}"
+            )
 
         promotion = None
         if len(uci) == 5:
