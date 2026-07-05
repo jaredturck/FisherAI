@@ -1,6 +1,5 @@
 import argparse
 import sys
-from pathlib import Path
 from types import ModuleType
 
 import pytest
@@ -17,7 +16,8 @@ def test_cli_only_exposes_required_commands():
     assert set(subparsers.choices) == {"workstation", "benchmark", "gui"}
     assert parser.prog == "python -m fisher_ai"
     assert parser.parse_args(["workstation"]).config == "fisher_config.json"
-    assert parser.parse_args(["benchmark"]).config == "fisher_config.json"
+    assert parser.parse_args(["workstation"]).iterations is None
+    assert parser.parse_args(["benchmark"]).positions is None
     assert parser.parse_args(["gui"]).handler is cli.command_gui
 
     for command in ("init", "self-play", "learn", "train", "evaluate", "uci"):
@@ -25,78 +25,45 @@ def test_cli_only_exposes_required_commands():
             parser.parse_args([command])
 
 
-def test_workstation_uses_configured_pool_and_internal_learner(monkeypatch):
+def test_workstation_runs_phased_pipeline(monkeypatch):
     calls = {}
 
-    class Runtime:
-        actor_processes = 24
-        games_per_actor = 6
-        learner_device = "cuda:0"
+    class Pipeline:
+        def __init__(self, config_path):
+            calls["config_path"] = config_path
 
-    class Config:
-        runtime = Runtime()
+        def run(self, iterations=None):
+            calls["iterations"] = iterations
 
-    class Manager:
-        def latest_path(self):
-            return Path("checkpoint.pt")
-
-    class Notifier:
-        def __init__(self):
-            calls["notifier"] = self
-
-        def send(self, *args, **kwargs):
-            calls.setdefault("notifications", []).append((args, kwargs))
-
-        def close(self):
-            calls["notifier_closed"] = True
-
-    class Pool:
-        def __init__(self, **kwargs):
-            calls["pool_kwargs"] = kwargs
-
-        def start(self):
-            calls["started"] = True
-
-        def monitor(self, external_processes):
-            calls["monitored"] = external_processes
-
-        def stop(self):
-            calls["stopped"] = True
-
-    class Process:
-        returncode = None
-
-        def poll(self):
-            return 0
-
-    process = Process()
-
-    monkeypatch.setattr(cli, "load_config", lambda path: Config())
-    monkeypatch.setattr(cli, "build_model", lambda config: object())
-    monkeypatch.setattr(cli, "build_checkpoint_manager", lambda config: Manager())
-    monkeypatch.setattr(cli, "DistributedSelfPlayPool", Pool)
-    monkeypatch.setattr(cli, "DiscordNotifier", Notifier)
-    monkeypatch.setattr(
-        cli.subprocess,
-        "Popen",
-        lambda command: calls.update(command=command) or process,
+    monkeypatch.setattr(cli, "PhasedTrainingPipeline", Pipeline)
+    cli.command_workstation(
+        argparse.Namespace(config="custom.json", iterations=3)
     )
 
-    args = argparse.Namespace(config="custom.json")
-    cli.command_workstation(args)
+    assert calls == {"config_path": "custom.json", "iterations": 3}
 
-    assert calls["pool_kwargs"] == {"config_path": "custom.json"}
-    assert calls["command"] == [
-        sys.executable,
-        "-m",
-        "fisher_ai.learner_worker",
-        "custom.json",
-    ]
-    assert calls["monitored"] == [process]
-    assert calls["started"]
-    assert calls["stopped"]
-    assert calls["notifications"][0][0][0] == "Fisher AI training started"
-    assert calls["notifier_closed"]
+
+def test_benchmark_command_reports_both_phases(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli,
+        "run_benchmark",
+        lambda **kwargs: (
+            {
+                "generation": {"positions_per_second": 12.5},
+                "training": {"positions_per_second": 25.0},
+            },
+            "results.csv",
+            "summary.md",
+        ),
+    )
+
+    cli.command_benchmark(
+        argparse.Namespace(config="custom.json", positions=100)
+    )
+    output = capsys.readouterr().out
+
+    assert "Generation: 12.50 positions/s" in output
+    assert "Training: 25.00 positions/s" in output
 
 
 def test_gui_command_launches_gui(monkeypatch):

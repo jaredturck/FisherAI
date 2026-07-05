@@ -30,7 +30,7 @@ def test_self_play_generates_full_search_training_records():
     assert all(game.checkpoint_step == 12 for game in games)
     assert all(game.result == 0 for game in games)
     assert all(len(game.samples) == 4 for game in games)
-    assert all(sample.state.shape == (119, 8, 8) for game in games for sample in game.samples)
+    assert all(game.materialize_state(0).shape == (119, 8, 8) for game in games)
     assert all(sample.policy_weight == 1 for game in games for sample in game.samples)
 
 

@@ -1,7 +1,6 @@
-````markdown
 # Fisher AI
 
-Fisher AI is an AlphaZero-style chess engine built with PyTorch. It learns entirely through self-play using Monte Carlo Tree Search and is optimized for a dual RTX 3090 workstation.
+Fisher AI is an AlphaZero-style chess engine built with PyTorch. It learns entirely through self-play using Monte Carlo Tree Search and uses a single GPU for both inference and training in separate phases.
 
 ## Installation
 
@@ -15,9 +14,24 @@ pip install -r requirements.txt
 python -m fisher_ai workstation
 ```
 
-This creates the initial checkpoint when needed and starts self-play and learning. A new checkpoint is saved after the first completed training burst at least 10 minutes after the previous save, and only the newest 10 are kept.
+Training now runs as a simple repeated cycle:
 
-Checkpoint updates are sent to Discord when `STATUS_WEBHOOK` is set in `.env`. Settings are stored in `fisher_config.json`.
+```text
+load checkpoint
+→ generate a fixed in-memory window
+→ stop generation
+→ shuffle every position without replacement
+→ train on the complete window
+→ save the next checkpoint
+```
+
+The default window targets at least 50,000 positions and closes on whole-game boundaries so every completed training position is used. Completed games are retained only in RAM for the current iteration; Fisher AI no longer writes an LMDB replay database. Generation and training both use the single device configured by `runtime.device`.
+
+Run a fixed number of iterations with:
+
+```bash
+python -m fisher_ai workstation --iterations 1
+```
 
 ## Play against Fisher AI
 
@@ -25,15 +39,14 @@ Checkpoint updates are sent to Discord when `STATUS_WEBHOOK` is set in `.env`. S
 python -m fisher_ai gui
 ```
 
-The GUI loads the latest checkpoint, so training must have been started at least once.
+The GUI loads the latest checkpoint from `checkpoints/`.
 
 ## Check and benchmark
 
 ```bash
 ruff check .
-pytest
+python -m pytest -q
 python -m fisher_ai benchmark
 ```
 
-Benchmark results are saved under `benchmarks/`.
-````
+The benchmark measures generation and training separately and saves fresh results under `benchmarks/`. Use `--positions` to choose the benchmark window size.

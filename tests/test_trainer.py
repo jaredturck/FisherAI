@@ -2,10 +2,25 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from fisher_ai import chess
 from fisher_ai.config import FisherConfig
-from fisher_ai.network import FisherNetwork
-from fisher_ai.replay import GameRecord, ReplayBuffer, TrainingSample
+from fisher_ai.dataset import GameRecord, InMemoryWindow, PositionTarget
+from fisher_ai.encoding import castling_rights_mask
+from fisher_ai.game import GameState
 from fisher_ai.trainer import AlphaZeroTrainer
+
+
+class TinyPolicyValueModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.policy_bias = nn.Parameter(torch.zeros(4))
+        self.value_bias = nn.Parameter(torch.zeros(1))
+
+    def forward(self, states):
+        batch_size = states.shape[0]
+        policy_logits = self.policy_bias.unsqueeze(0).expand(batch_size, -1)
+        predicted_values = torch.tanh(self.value_bias).expand(batch_size)
+        return policy_logits, predicted_values
 
 
 class HalfPrecisionPolicyModel(nn.Module):
@@ -20,7 +35,42 @@ class HalfPrecisionPolicyModel(nn.Module):
         return policy_logits, predicted_values
 
 
-def test_trainer_runs_one_update_with_mixed_policy_weights(tmp_path):
+def make_window(position_count):
+    state = GameState(max_game_plies=40)
+    snapshots = [state.history[-1]]
+    samples = []
+    moves = ["e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "g8f6", "d2d3"]
+
+    for index in range(position_count):
+        samples.append(
+            PositionTarget(
+                len(snapshots) - 1,
+                state.board.turn,
+                state.board.ply(),
+                castling_rights_mask(state.board),
+                state.board.halfmove_clock,
+                [1, 2, 3],
+                [4, 2, 1],
+                value=1,
+                policy_weight=index % 2,
+            )
+        )
+        if index + 1 < position_count:
+            state.push(chess.Move.from_uci(moves[index]))
+            snapshots.append(state.history[-1])
+
+    window = InMemoryWindow(position_count)
+    window.add_game(
+        GameRecord(
+            snapshots=snapshots,
+            samples=samples,
+            max_game_plies=state.max_game_plies,
+        )
+    )
+    return window
+
+
+def test_trainer_uses_every_window_position_once():
     config = FisherConfig()
     config.network.channels = 8
     config.network.residual_blocks = 1
@@ -28,55 +78,27 @@ def test_trainer_runs_one_update_with_mixed_policy_weights(tmp_path):
     config.network.policy_channels = 8
     config.network.value_channels = 2
     config.network.value_hidden = 16
-    config.training.batch_size = 8
-    config.training.micro_batch_size = 4
-    config.training.replay_positions_per_game = 4
+    config.training.batch_size = 3
+    config.training.epochs_per_window = 1
 
-    replay = ReplayBuffer(tmp_path / "replay.lmdb", max_positions=100)
-    samples = []
-    for index in range(8):
-        state = np.zeros((119, 8, 8), dtype=np.float16)
-        state[0, index, index] = 1
-        samples.append(
-            TrainingSample(
-                state,
-                [1, 2, 3],
-                [4, 2, 1],
-                value=1,
-                policy_weight=index % 2,
-            )
-        )
-    replay.add_game(GameRecord(samples=samples, result=1))
-
-    class Manager:
-        def __init__(self):
-            self.saved = 0
-
-        def save(self, *args, **kwargs):
-            self.saved += 1
-
-    manager = Manager()
-    model = FisherNetwork(config.network)
     trainer = AlphaZeroTrainer(
-        model,
-        replay,
+        TinyPolicyValueModel(),
         config,
         device="cpu",
-        checkpoint_manager=manager,
     )
-    metrics = trainer.train_step()
+    metrics = trainer.train_window(make_window(7))
+    seen = metrics["seen_indices"][0]
 
-    assert metrics["step"] == 1
-    assert metrics["loss"] > 0
-    assert metrics["policy_loss"] > 0
-    assert metrics["sampled_positions"] == 8
-    assert manager.saved == 0
-    replay.close()
+    assert metrics["optimizer_steps"] == 3
+    assert metrics["positions"] == 7
+    assert trainer.positions_trained == 7
+    assert sorted(seen.tolist()) == list(range(7))
+    assert len(np.unique(seen)) == 7
 
 
 def test_compute_loss_handles_half_precision_policy_logits():
     config = FisherConfig()
-    trainer = AlphaZeroTrainer(HalfPrecisionPolicyModel(), None, config, device="cpu")
+    trainer = AlphaZeroTrainer(HalfPrecisionPolicyModel(), config, device="cpu")
 
     states = torch.zeros((2, 1), dtype=torch.float32)
     legal_actions = torch.tensor([[0, 1, 0], [1, 2, 3]], dtype=torch.int64)
@@ -92,8 +114,6 @@ def test_compute_loss_handles_half_precision_policy_logits():
         legal_mask,
         target_values,
         policy_weights,
-        policy_normalizer=2.0,
-        value_normalizer=2.0,
     )
 
     assert torch.isfinite(loss)

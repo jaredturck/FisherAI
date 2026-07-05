@@ -48,39 +48,85 @@ def square_row_col(square):
     return chess.square_rank(square), chess.square_file(square)
 
 
-def encode_state(state):
-    planes = np.zeros((INPUT_PLANES, 8, 8), dtype=np.float32)
-    current_color = state.board.turn
-    snapshots = list(state.history)
+def castling_rights_mask(board):
+    mask = 0
+    mask |= int(board.has_kingside_castling_rights(chess.WHITE))
+    mask |= int(board.has_queenside_castling_rights(chess.WHITE)) << 1
+    mask |= int(board.has_kingside_castling_rights(chess.BLACK)) << 2
+    mask |= int(board.has_queenside_castling_rights(chess.BLACK)) << 3
+    return mask
+
+
+def snapshot_planes(snapshot):
+    return np.unpackbits(
+        snapshot.bitboards.view(np.uint8),
+        bitorder="little",
+    ).reshape(12, 8, 8)
+
+
+def encode_history(
+    snapshots,
+    current_color,
+    ply,
+    max_game_plies,
+    castling_mask,
+    halfmove_clock,
+    output=None,
+):
+    if output is None:
+        output = np.zeros((INPUT_PLANES, 8, 8), dtype=np.float32)
+    else:
+        output.fill(0)
+
+    snapshots = list(snapshots)[-8:]
     start_plane = (8 - len(snapshots)) * 14
 
     for history_index, snapshot in enumerate(snapshots):
         plane_offset = start_plane + history_index * 14
-        piece_planes = snapshot.piece_planes
+        piece_planes = snapshot_planes(snapshot)
 
         if current_color == chess.WHITE:
-            planes[plane_offset : plane_offset + 12] = piece_planes
+            output[plane_offset : plane_offset + 12] = piece_planes
         else:
-            planes[plane_offset : plane_offset + 6] = piece_planes[6:12, ::-1, ::-1]
-            planes[plane_offset + 6 : plane_offset + 12] = piece_planes[0:6, ::-1, ::-1]
+            output[plane_offset : plane_offset + 6] = piece_planes[6:12, ::-1, ::-1]
+            output[plane_offset + 6 : plane_offset + 12] = piece_planes[0:6, ::-1, ::-1]
 
         if snapshot.repetition_count >= 2:
-            planes[plane_offset + 12].fill(1.0)
+            output[plane_offset + 12].fill(1.0)
         if snapshot.repetition_count >= 3:
-            planes[plane_offset + 13].fill(1.0)
+            output[plane_offset + 13].fill(1.0)
 
-    planes[112].fill(1.0 if current_color == chess.WHITE else 0.0)
-    planes[113].fill(min(state.board.ply(), state.max_game_plies) / state.max_game_plies)
+    output[112].fill(1.0 if current_color == chess.WHITE else 0.0)
+    output[113].fill(min(ply, max_game_plies) / max_game_plies)
 
-    own_color = current_color
-    opponent_color = not current_color
-    planes[114].fill(float(state.board.has_kingside_castling_rights(own_color)))
-    planes[115].fill(float(state.board.has_queenside_castling_rights(own_color)))
-    planes[116].fill(float(state.board.has_kingside_castling_rights(opponent_color)))
-    planes[117].fill(float(state.board.has_queenside_castling_rights(opponent_color)))
-    planes[118].fill(min(state.board.halfmove_clock, 100) / 100.0)
+    if current_color == chess.WHITE:
+        own_kingside = castling_mask & 1
+        own_queenside = castling_mask >> 1 & 1
+        opponent_kingside = castling_mask >> 2 & 1
+        opponent_queenside = castling_mask >> 3 & 1
+    else:
+        own_kingside = castling_mask >> 2 & 1
+        own_queenside = castling_mask >> 3 & 1
+        opponent_kingside = castling_mask & 1
+        opponent_queenside = castling_mask >> 1 & 1
 
-    return planes
+    output[114].fill(float(own_kingside))
+    output[115].fill(float(own_queenside))
+    output[116].fill(float(opponent_kingside))
+    output[117].fill(float(opponent_queenside))
+    output[118].fill(min(halfmove_clock, 100) / 100.0)
+    return output
+
+
+def encode_state(state):
+    return encode_history(
+        state.history,
+        state.board.turn,
+        state.board.ply(),
+        state.max_game_plies,
+        castling_rights_mask(state.board),
+        state.board.halfmove_clock,
+    )
 
 
 def move_to_action(move, current_color):

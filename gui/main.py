@@ -147,7 +147,7 @@ class ChessGUI:
             pygame.display.flip()
             return
 
-        preferred_device = config.runtime.self_play_device
+        preferred_device = config.runtime.device
         self.device = available_device(preferred_device)
         model = FisherNetwork(config.network)
         self.checkpoint_step, _ = manager.load(model, path=checkpoint_path, device="cpu")

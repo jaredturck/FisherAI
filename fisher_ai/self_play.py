@@ -1,10 +1,10 @@
 import numpy as np
 
 from fisher_ai import chess
-from fisher_ai.encoding import encode_state
+from fisher_ai.dataset import GameRecord, PositionTarget
+from fisher_ai.encoding import castling_rights_mask
 from fisher_ai.game import GameState
 from fisher_ai.mcts import MCTSTree
-from fisher_ai.replay import GameRecord, TrainingSample
 
 
 class SelfPlaySession:
@@ -17,6 +17,7 @@ class SelfPlaySession:
     ):
         self.state = GameState(max_game_plies=max_game_plies)
         self.root = MCTSTree(tree_capacity)
+        self.snapshots = [self.state.history[-1]]
         self.pending_samples = []
         self.moves = []
         self.finished = False
@@ -25,10 +26,14 @@ class SelfPlaySession:
         self.audit_resignation = audit_resignation
         self.resignation_streak = 0
 
-    def add_search_sample(self, actions, visit_counts, policy_weight, encoded_state=None):
+    def add_search_sample(self, actions, visit_counts, policy_weight):
         self.pending_samples.append(
             {
-                "state": encoded_state if encoded_state is not None else encode_state(self.state),
+                "snapshot_index": len(self.snapshots) - 1,
+                "current_color": self.state.board.turn,
+                "ply": self.state.board.ply(),
+                "castling_mask": castling_rights_mask(self.state.board),
+                "halfmove_clock": self.state.board.halfmove_clock,
                 "legal_actions": actions,
                 "visit_counts": visit_counts,
                 "policy_weight": policy_weight,
@@ -40,6 +45,7 @@ class SelfPlaySession:
         move = self.root.advance(action)
         self.moves.append(move.uci())
         self.state.push(move)
+        self.snapshots.append(self.state.history[-1])
         self.finished = self.state.is_terminal()
 
     def resign(self):
@@ -56,8 +62,12 @@ class SelfPlaySession:
         for pending in self.pending_samples:
             value = result if pending["player"] == chess.WHITE else -result
             samples.append(
-                TrainingSample(
-                    pending["state"],
+                PositionTarget(
+                    pending["snapshot_index"],
+                    pending["current_color"],
+                    pending["ply"],
+                    pending["castling_mask"],
+                    pending["halfmove_clock"],
                     pending["legal_actions"],
                     pending["visit_counts"],
                     value=value,
@@ -66,10 +76,12 @@ class SelfPlaySession:
             )
 
         return GameRecord(
+            snapshots=self.snapshots,
             samples=samples,
             moves=self.moves,
             result=result,
             checkpoint_step=checkpoint_step,
+            max_game_plies=self.state.max_game_plies,
         )
 
 
@@ -136,7 +148,6 @@ class SelfPlayRunner:
                 actions.astype(np.uint16),
                 counts_uint16,
                 policy_weight=1.0 if full_search else 0.0,
-                encoded_state=root.encoded_state,
             )
 
             if full_search and root.mean_value <= self.resignation_threshold:

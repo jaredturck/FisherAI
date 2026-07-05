@@ -16,19 +16,25 @@ PIECE_TYPES = (
 
 class PositionSnapshot:
     def __init__(self, board, repetition_count):
-        self.repetition_count = repetition_count
-        self.piece_planes = self.build_piece_planes(board)
+        self.repetition_count = int(repetition_count)
+        self.bitboards = self.build_bitboards(board)
 
     @staticmethod
-    def build_piece_planes(board):
-        planes = np.zeros((12, 8, 8), dtype=np.uint8)
+    def build_bitboards(board):
+        bitboards = np.zeros(12, dtype=np.uint64)
         for color_index, color in enumerate((chess.WHITE, chess.BLACK)):
             for piece_index, piece_type in enumerate(PIECE_TYPES):
-                for square in board.pieces(piece_type, color):
-                    row = chess.square_rank(square)
-                    col = chess.square_file(square)
-                    planes[color_index * 6 + piece_index, row, col] = 1
-        return planes
+                bitboards[color_index * 6 + piece_index] = np.uint64(
+                    int(board.pieces_mask(piece_type, color))
+                )
+        return bitboards
+
+    @property
+    def piece_planes(self):
+        return np.unpackbits(
+            self.bitboards.view(np.uint8),
+            bitorder="little",
+        ).reshape(12, 8, 8)
 
 
 class GameState:

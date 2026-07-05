@@ -26,8 +26,10 @@
     "tree_capacity": 131072
   },
   "training": {
-    "batch_size": 1024,
-    "micro_batch_size": 512,
+    "window_positions": 50000,
+    "batch_size": 2048,
+    "epochs_per_window": 1,
+    "training_iterations": 0,
     "momentum": 0.9,
     "weight_decay": 0.0001,
     "learning_rates": [
@@ -42,44 +44,27 @@
       250000,
       500000
     ],
-    "training_steps": 700000,
-    "replay_max_positions": 2000000,
-    "replay_positions_per_game": 8,
-    "warmup_positions": 20000,
-    "max_sample_ratio": 2.0,
     "resignation_enabled_after_games": 50000,
     "resignation_threshold": -0.9,
     "resignation_consecutive_moves": 3,
     "resignation_audit_fraction": 0.1
   },
   "runtime": {
-    "data_dir": "data",
-    "replay_path": "data/replay.lmdb",
     "checkpoint_dir": "checkpoints",
-    "self_play_device": "cuda:1",
-    "self_play_devices": [
-      "cuda:0",
-      "cuda:1"
-    ],
-    "learner_device": "cuda:0",
-    "self_play_games_per_batch": 64,
+    "device": "cuda:0",
     "actor_processes": 24,
     "games_per_actor": 6,
-    "self_play_scheduler": "batched",
     "pin_actor_cpus": true,
     "inference_batch_size": 512,
+    "inference_max_batch_size": 1024,
     "inference_batch_wait_ms": 2.0,
     "inference_queue_size": 4096,
+    "game_queue_size": 256,
     "max_legal_actions": 256,
-    "replay_queue_size": 1024,
-    "replay_write_batch": 32,
     "status_interval_seconds": 10.0,
-    "checkpoint_reload_seconds": 30.0,
     "channels_last": true,
-    "seed": 7,
-    "inference_max_batch_size": 1024,
-    "inference_request_batch_size": 0,
-    "max_inflight_requests_per_actor": 1,
-    "benchmark_dir": "benchmarks"
+    "benchmark_dir": "benchmarks",
+    "benchmark_positions": 5000,
+    "seed": 7
   }
 }
