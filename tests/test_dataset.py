@@ -2,7 +2,7 @@ import numpy as np
 
 from fisher_ai import chess
 from fisher_ai.dataset import GameRecord, InMemoryWindow
-from fisher_ai.encoding import castling_rights_mask, encode_state
+from fisher_ai.encoding import encode_state
 from fisher_ai.game import GameState
 from fisher_ai.mcts import MAX_LEGAL_ACTIONS
 
@@ -36,8 +36,8 @@ def make_record(position_count=4, action_count=2):
         state.current_bitboards(snapshots[index])
         repetitions[index] = state.repetition_count
         colors[index] = state.board.turn
-        plies[index] = state.board.ply()
-        castling[index] = castling_rights_mask(state.board)
+        plies[index] = state.board.ply_count
+        castling[index] = state.board.castling_rights
         halfmoves[index] = state.board.halfmove_clock
         actions[index, :action_count] = np.arange(1, action_count + 1)
         counts[index, :action_count] = np.arange(

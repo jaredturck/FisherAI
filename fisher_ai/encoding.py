@@ -5,30 +5,8 @@ from fisher_ai.game import HISTORY_LENGTH, MAX_GAME_PLIES
 
 INPUT_PLANES = 119
 ACTION_PLANES = 73
-ACTION_SIZE = 64 * ACTION_PLANES
-
-QUEEN_DIRECTIONS = (
-    (1, 0),
-    (1, 1),
-    (0, 1),
-    (-1, 1),
-    (-1, 0),
-    (-1, -1),
-    (0, -1),
-    (1, -1),
-)
-KNIGHT_DIRECTIONS = (
-    (2, 1),
-    (1, 2),
-    (-1, 2),
-    (-2, 1),
-    (-2, -1),
-    (-1, -2),
-    (1, -2),
-    (2, -1),
-)
-UNDERPROMOTION_PIECES = (chess.KNIGHT, chess.BISHOP, chess.ROOK)
-PROMOTION_CODE_TO_ACTION_INDEX = np.asarray((0, 1, 2, 3, 0), dtype=np.uint8)
+ACTION_SIZE = chess.ACTION_SIZE
+move_to_action = chess.move_to_action
 
 
 class StateEncodingWorkspace:
@@ -50,23 +28,6 @@ class StateEncodingWorkspace:
         self.plies = np.empty(self.capacity, dtype=np.uint16)
         self.castling_masks = np.empty(self.capacity, dtype=np.uint8)
         self.halfmove_clocks = np.empty(self.capacity, dtype=np.uint8)
-
-
-def canonical_square(square, current_color):
-    return square if current_color == chess.WHITE else 63 - square
-
-
-def square_row_col(square):
-    return chess.square_rank(square), chess.square_file(square)
-
-
-def castling_rights_mask(board):
-    mask = 0
-    mask |= int(board.has_kingside_castling_rights(chess.WHITE))
-    mask |= int(board.has_queenside_castling_rights(chess.WHITE)) << 1
-    mask |= int(board.has_kingside_castling_rights(chess.BLACK)) << 2
-    mask |= int(board.has_queenside_castling_rights(chess.BLACK)) << 3
-    return mask
 
 
 def bitboards_to_planes(bitboards):
@@ -201,8 +162,8 @@ def encode_states(states, output=None, workspace=None):
         history_repetitions[index, start:] = state.history_repetitions[:length]
         history_valid[index, start:] = True
         current_colors[index] = state.board.turn
-        plies[index] = state.board.ply()
-        castling_masks[index] = castling_rights_mask(state.board)
+        plies[index] = state.board.ply_count
+        castling_masks[index] = state.board.castling_rights
         halfmove_clocks[index] = state.board.halfmove_clock
 
     return encode_history_batch(
@@ -253,103 +214,3 @@ def encode_window_batch(
         np.asarray(halfmove_clocks)[indices],
         output=output,
     )
-
-
-def calculate_action(from_square, to_square, promotion, current_color):
-    canonical_from = canonical_square(from_square, current_color)
-    canonical_to = canonical_square(to_square, current_color)
-    from_row, from_col = square_row_col(canonical_from)
-    to_row, to_col = square_row_col(canonical_to)
-    row_delta = to_row - from_row
-    col_delta = to_col - from_col
-
-    if promotion in UNDERPROMOTION_PIECES:
-        if row_delta != 1 or col_delta not in (-1, 0, 1):
-            return -1
-        direction_index = col_delta + 1
-        piece_index = UNDERPROMOTION_PIECES.index(promotion)
-        move_plane = 64 + direction_index * 3 + piece_index
-        return move_plane * 64 + canonical_from
-
-    delta = (row_delta, col_delta)
-    if delta in KNIGHT_DIRECTIONS:
-        move_plane = 56 + KNIGHT_DIRECTIONS.index(delta)
-        return move_plane * 64 + canonical_from
-
-    distance = max(abs(row_delta), abs(col_delta))
-    if distance < 1 or distance > 7:
-        return -1
-    direction = (
-        0 if row_delta == 0 else row_delta // abs(row_delta),
-        0 if col_delta == 0 else col_delta // abs(col_delta),
-    )
-    if direction not in QUEEN_DIRECTIONS:
-        return -1
-    if not (
-        row_delta == 0 or col_delta == 0 or abs(row_delta) == abs(col_delta)
-    ):
-        return -1
-
-    move_plane = QUEEN_DIRECTIONS.index(direction) * 7 + distance - 1
-    return move_plane * 64 + canonical_from
-
-
-ACTION_LOOKUP = np.full((2, 4, 64, 64), -1, dtype=np.int16)
-for color in (chess.BLACK, chess.WHITE):
-    for from_square in range(64):
-        for to_square in range(64):
-            ACTION_LOOKUP[int(color), 0, from_square, to_square] = (
-                calculate_action(from_square, to_square, None, color)
-            )
-            for promotion_index, promotion in enumerate(
-                UNDERPROMOTION_PIECES,
-                start=1,
-            ):
-                ACTION_LOOKUP[
-                    int(color),
-                    promotion_index,
-                    from_square,
-                    to_square,
-                ] = calculate_action(
-                    from_square,
-                    to_square,
-                    promotion,
-                    color,
-                )
-
-PACKED_MOVE_COUNT = 1 << 15
-PACKED_ACTION_LOOKUP = np.full((2, PACKED_MOVE_COUNT), -1, dtype=np.int16)
-_packed_moves = np.arange(PACKED_MOVE_COUNT, dtype=np.uint16)
-_packed_from = _packed_moves & 63
-_packed_to = _packed_moves >> 6 & 63
-_packed_promotion = _packed_moves >> 12
-_valid_promotion = _packed_promotion < len(PROMOTION_CODE_TO_ACTION_INDEX)
-_promotion_indices = np.zeros(PACKED_MOVE_COUNT, dtype=np.uint8)
-_promotion_indices[_valid_promotion] = PROMOTION_CODE_TO_ACTION_INDEX[
-    _packed_promotion[_valid_promotion]
-]
-for color in (chess.BLACK, chess.WHITE):
-    PACKED_ACTION_LOOKUP[int(color), _valid_promotion] = ACTION_LOOKUP[
-        int(color),
-        _promotion_indices[_valid_promotion],
-        _packed_from[_valid_promotion],
-        _packed_to[_valid_promotion],
-    ]
-
-
-def moves_to_actions(moves, current_color, output=None, count=None):
-    moves = np.asarray(moves, dtype=np.uint16)
-    if count is None:
-        count = len(moves)
-    actions = PACKED_ACTION_LOOKUP[int(current_color), moves[:count]]
-    if np.any(actions < 0):
-        raise AssertionError("move could not be mapped to a policy action")
-    if output is None:
-        return actions.astype(np.uint16, copy=True)
-    output[:count] = actions
-    return output
-
-
-def move_to_action(move, current_color):
-    moves = np.asarray((move,), dtype=np.uint16)
-    return int(moves_to_actions(moves, current_color)[0])

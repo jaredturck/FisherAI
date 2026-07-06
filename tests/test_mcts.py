@@ -54,7 +54,7 @@ def test_mcts_finds_mate_in_one():
     child = state.copy()
     child.push(root.move_for_action(action))
 
-    assert child.board.is_checkmate()
+    assert child.terminal_status() == chess.CHECKMATE
 
 
 def test_policy_prior_guides_early_search():

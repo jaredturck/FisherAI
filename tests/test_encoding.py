@@ -10,6 +10,12 @@ from fisher_ai.encoding import (
 from fisher_ai.game import GameState
 
 
+def legal_moves(board):
+    buffer = np.empty(256, dtype=np.uint32)
+    count, _ = board.fill_legal_moves(buffer)
+    return buffer[:count].copy()
+
+
 def test_initial_state_has_expected_shape_and_piece_counts():
     state = GameState()
     encoded = encode_state(state)
@@ -47,16 +53,14 @@ def test_legal_moves_have_unique_action_indices():
     state = GameState()
 
     for _ in range(50):
-        actions = [
-            move_to_action(move, state.board.turn)
-            for move in state.board.legal_moves
-        ]
+        moves = legal_moves(state.board)
+        actions = [move_to_action(move, state.board.turn) for move in moves]
         assert len(actions) == len(set(actions))
         assert all(0 <= action < ACTION_SIZE for action in actions)
 
         if state.is_terminal():
             break
-        state.push(next(iter(state.board.legal_moves)))
+        state.push(int(moves[0]))
 
 
 def test_castling_and_underpromotions_use_distinct_actions():
@@ -99,14 +103,14 @@ def test_game_state_copy_owns_independent_dense_arrays():
     state.push(chess.move_from_uci("e2e4"))
     copied = state.copy()
 
-    original_key = state.board.position_key()
+    original_hash = state.board.position_hash()
     assert not np.shares_memory(
         state.history_bitboards,
         copied.history_bitboards,
     )
     copied.push(chess.move_from_uci("e7e5"))
-    assert state.board.position_key() == original_key
-    assert copied.board.position_key() != original_key
+    assert state.board.position_hash() == original_hash
+    assert copied.board.position_hash() != original_hash
 
 
 def test_cached_repetition_count_does_not_recompute_position_hash(monkeypatch):

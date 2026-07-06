@@ -16,6 +16,8 @@ class GameState:
         "position_hashes",
         "position_hash_length",
         "repetition_count",
+        "legal_move_buffer",
+        "terminal_status_cache",
     )
 
     def __init__(self, board=None):
@@ -36,6 +38,8 @@ class GameState:
         self.position_hash_length = 1
         self.position_hashes[0] = self.board.position_hash()
         self.repetition_count = 1
+        self.legal_move_buffer = np.empty(256, dtype=np.uint32)
+        self.terminal_status_cache = -1
         self._append_snapshot(1)
 
     def copy(self):
@@ -47,6 +51,8 @@ class GameState:
         state.position_hashes = self.position_hashes.copy()
         state.position_hash_length = self.position_hash_length
         state.repetition_count = self.repetition_count
+        state.legal_move_buffer = np.empty(256, dtype=np.uint32)
+        state.terminal_status_cache = self.terminal_status_cache
         return state
 
     def copy_from(self, other):
@@ -57,6 +63,7 @@ class GameState:
         self.position_hashes[:] = other.position_hashes
         self.position_hash_length = other.position_hash_length
         self.repetition_count = other.repetition_count
+        self.terminal_status_cache = other.terminal_status_cache
         return self
 
     def _append_snapshot(self, repetition_count):
@@ -73,6 +80,7 @@ class GameState:
 
     def push(self, move):
         self.board.push(move)
+        self.terminal_status_cache = -1
         position_hash = self.board.position_hash()
         length = self.position_hash_length
         self.position_hashes[length] = position_hash
@@ -95,7 +103,7 @@ class GameState:
         return self.repetition_count
 
     def is_rule_draw(self):
-        if self.board.ply() >= MAX_GAME_PLIES:
+        if self.board.ply_count >= MAX_GAME_PLIES:
             return True
         if self.repetition_count >= 3:
             return True
@@ -103,15 +111,23 @@ class GameState:
             return True
         return self.board.is_insufficient_material()
 
-    def is_terminal(self):
+    def terminal_status(self):
+        if self.terminal_status_cache >= 0:
+            return self.terminal_status_cache
         if self.is_rule_draw():
-            return True
-        return not bool(self.board.legal_moves)
+            self.terminal_status_cache = chess.STALEMATE
+            return self.terminal_status_cache
+        _, status = self.board.fill_legal_moves(self.legal_move_buffer)
+        self.terminal_status_cache = status
+        return status
+
+    def is_terminal(self):
+        return self.terminal_status() != chess.ONGOING
 
     def terminal_value(self):
-        return -1.0 if self.board.is_check() else 0.0
+        return -1.0 if self.terminal_status() == chess.CHECKMATE else 0.0
 
     def final_result(self):
-        if not self.board.is_check():
+        if self.terminal_status() != chess.CHECKMATE:
             return 0
         return -1 if self.board.turn == chess.WHITE else 1

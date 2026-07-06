@@ -2,7 +2,6 @@ import numpy as np
 
 from fisher_ai import chess
 from fisher_ai.dataset import GameRecord
-from fisher_ai.encoding import castling_rights_mask
 from fisher_ai.game import MAX_GAME_PLIES, GameState
 from fisher_ai.mcts import MAX_LEGAL_ACTIONS
 
@@ -45,8 +44,8 @@ class SelfPlaySession:
         self.state.current_bitboards(self.snapshot_bitboards[index])
         self.snapshot_repetitions[index] = self.state.repetition_count
         self.current_colors[index] = self.state.board.turn
-        self.plies[index] = self.state.board.ply()
-        self.castling_masks[index] = castling_rights_mask(self.state.board)
+        self.plies[index] = self.state.board.ply_count
+        self.castling_masks[index] = self.state.board.castling_rights
         self.halfmove_clocks[index] = self.state.board.halfmove_clock
         self.legal_lengths[index] = length
         self.legal_actions[index, :length] = actions
@@ -123,7 +122,7 @@ class SelfPlayRunner:
 
             temperature = (
                 EARLY_TEMPERATURE
-                if session.state.board.ply() < EARLY_TEMPERATURE_PLIES
+                if session.state.board.ply_count < EARLY_TEMPERATURE_PLIES
                 else LATE_TEMPERATURE
             )
             action = self.mcts.choose_action(root, temperature=temperature)

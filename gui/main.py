@@ -2,6 +2,7 @@ import queue
 import threading
 from pathlib import Path
 
+import numpy as np
 import pygame
 
 from fisher_ai import chess
@@ -102,6 +103,7 @@ class ChessGUI:
         self.move_history = []
         self.engine_thinking = False
         self.engine_results = queue.Queue()
+        self.legal_move_buffer = np.empty(256, dtype=np.uint32)
         self.running = True
         self.status = "Loading FisherAI..."
 
@@ -206,10 +208,16 @@ class ChessGUI:
         )
         return color, piece_type
 
+    def current_legal_moves(self):
+        if not hasattr(self, "legal_move_buffer"):
+            self.legal_move_buffer = np.empty(256, dtype=np.uint32)
+        count, _ = self.state.board.fill_legal_moves(self.legal_move_buffer)
+        return self.legal_move_buffer[:count]
+
     def legal_moves_from(self, square):
         return [
-            move
-            for move in self.state.board.legal_moves
+            int(move)
+            for move in self.current_legal_moves()
             if chess.move_from_square(move) == square
         ]
 
@@ -232,7 +240,7 @@ class ChessGUI:
         )
 
     def choose_human_move(self, from_square, to_square):
-        legal_moves = list(self.state.board.legal_moves)
+        legal_moves = self.current_legal_moves()
         candidates = [
             move
             for move in legal_moves
@@ -341,14 +349,15 @@ class ChessGUI:
         self.play_move(move)
 
     def update_status(self):
-        if self.state.board.is_checkmate():
+        terminal_status = self.state.terminal_status()
+        if terminal_status == chess.CHECKMATE:
             winner = (
                 "You win"
                 if self.state.board.turn == ENGINE_COLOR
                 else "FisherAI wins"
             )
             self.status = f"Checkmate — {winner}"
-        elif self.state.is_terminal():
+        elif terminal_status != chess.ONGOING:
             self.status = "Draw"
         elif self.state.board.is_check():
             self.status = (

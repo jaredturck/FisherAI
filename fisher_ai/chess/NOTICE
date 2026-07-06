@@ -1,9 +1,0 @@
-This package contains a reduced and adapted subset of python-chess 1.11.2.
-
-Original project: python-chess
-Original author: Niklas Fiekas
-Original license: GNU General Public License v3 or later
-
-Only the standard-chess bitboard, legal move generation, move application,
-FEN/UCI, terminal-material, castling, and repetition-key behavior required by
-FisherAI has been retained. The accompanying LICENSE.txt applies to this code.

@@ -6,7 +6,6 @@ from fisher_ai.encoding import (
     INPUT_PLANES,
     StateEncodingWorkspace,
     encode_states,
-    moves_to_actions,
 )
 from fisher_ai.game import HISTORY_LENGTH, MAX_GAME_PLIES, GameState
 
@@ -106,7 +105,9 @@ class MCTSStatePool:
                 "castling_rights",
                 "ep_square",
                 "halfmove_clock",
-                "fullmove_number",
+                "ply_count",
+                "ep_hash_file",
+                "zobrist_hash",
                 "history_bitboards",
                 "history_repetitions",
                 "history_length",
@@ -128,10 +129,12 @@ class MCTSStatePool:
         self.occupied_black = np.empty(self.capacity, dtype=np.uint64)
         self.occupied = np.empty(self.capacity, dtype=np.uint64)
         self.turn = np.empty(self.capacity, dtype=np.bool_)
-        self.castling_rights = np.empty(self.capacity, dtype=np.uint64)
+        self.castling_rights = np.empty(self.capacity, dtype=np.uint8)
         self.ep_square = np.empty(self.capacity, dtype=np.int8)
         self.halfmove_clock = np.empty(self.capacity, dtype=np.uint16)
-        self.fullmove_number = np.empty(self.capacity, dtype=np.uint16)
+        self.ply_count = np.empty(self.capacity, dtype=np.uint16)
+        self.ep_hash_file = np.empty(self.capacity, dtype=np.int8)
+        self.zobrist_hash = np.empty(self.capacity, dtype=np.uint64)
         self.history_bitboards = np.empty(
             (self.capacity, HISTORY_LENGTH, 12),
             dtype=np.uint64,
@@ -180,7 +183,9 @@ class MCTSStatePool:
             -1 if board.ep_square is None else board.ep_square
         )
         self.halfmove_clock[slot] = board.halfmove_clock
-        self.fullmove_number[slot] = board.fullmove_number
+        self.ply_count[slot] = board.ply_count
+        self.ep_hash_file[slot] = board.ep_hash_file
+        self.zobrist_hash[slot] = board.zobrist_hash
         self.history_bitboards[slot] = state.history_bitboards
         self.history_repetitions[slot] = state.history_repetitions
         self.history_length[slot] = state.history_length
@@ -237,11 +242,14 @@ class MCTSStatePool:
         ep_square = int(self.ep_square[slot])
         board.ep_square = None if ep_square < 0 else ep_square
         board.halfmove_clock = int(self.halfmove_clock[slot])
-        board.fullmove_number = int(self.fullmove_number[slot])
+        board.ply_count = int(self.ply_count[slot])
+        board.ep_hash_file = int(self.ep_hash_file[slot])
+        board.zobrist_hash = int(self.zobrist_hash[slot])
         state.history_bitboards[:] = self.history_bitboards[slot]
         state.history_repetitions[:] = self.history_repetitions[slot]
         state.history_length = int(self.history_length[slot])
         state.repetition_count = int(self.repetition_count[slot])
+        state.terminal_status_cache = -1
         return state
 
 
@@ -249,7 +257,7 @@ class MCTSTree:
     def __init__(self, capacity, state_capacity=256):
         self.capacity = int(capacity)
         self.actions = np.empty(self.capacity, dtype=np.uint16)
-        self.moves = np.empty(self.capacity, dtype=np.uint16)
+        self.moves = np.empty(self.capacity, dtype=np.uint32)
         self.priors = np.empty(self.capacity, dtype=np.float32)
         self.visit_counts = np.empty(self.capacity, dtype=np.uint32)
         self.mean_values = np.empty(self.capacity, dtype=np.float32)
@@ -429,7 +437,7 @@ class MCTS:
         )
         self.packed_moves = np.empty(
             (pending_count, MAX_LEGAL_ACTIONS),
-            dtype=np.uint16,
+            dtype=np.uint32,
         )
         self.legal_lengths = np.empty(pending_count, dtype=np.uint16)
         self.state_workspaces = [GameState() for _ in range(pending_count)]
@@ -787,21 +795,18 @@ class MCTS:
 
     @staticmethod
     def fill_legal_action_data(state, actions, packed_moves):
-        count = state.board.fill_legal_moves(packed_moves)
-        moves_to_actions(
-            packed_moves,
-            state.board.turn,
-            output=actions,
-            count=count,
-        )
-        actions[count:] = 0
-        return count
+        count, status = state.board.fill_legal_moves(packed_moves, actions)
+        return count, status
 
     @staticmethod
     def legal_action_data(state):
         actions = np.empty(MAX_LEGAL_ACTIONS, dtype=np.uint16)
-        packed_moves = np.empty(MAX_LEGAL_ACTIONS, dtype=np.uint16)
-        count = MCTS.fill_legal_action_data(state, actions, packed_moves)
+        packed_moves = np.empty(MAX_LEGAL_ACTIONS, dtype=np.uint32)
+        count, _ = MCTS.fill_legal_action_data(
+            state,
+            actions,
+            packed_moves,
+        )
         return actions[:count].copy(), packed_moves[:count].copy()
 
     def prepare_leaf(self, state, row):
@@ -809,7 +814,7 @@ class MCTS:
             self.legal_lengths[row] = 0
             return 0.0
 
-        count = self.fill_legal_action_data(
+        count, status = self.fill_legal_action_data(
             state,
             self.legal_actions[row],
             self.packed_moves[row],
@@ -817,7 +822,7 @@ class MCTS:
         self.legal_lengths[row] = count
         if count:
             return None
-        return -1.0 if state.board.is_check() else 0.0
+        return -1.0 if status == chess.CHECKMATE else 0.0
 
     def evaluate_and_expand(self, roots, count):
         policies, values = self.evaluator.evaluate_encoded(
