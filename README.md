@@ -75,6 +75,17 @@ benchmarks/benchmark_results.csv
 benchmarks/benchmark_summary.md
 ```
 
+The CSV uses a long-format metric schema and contains end-to-end phase timing,
+parent-side blocking, training batch timing, workload distributions, process
+resource counters, memory usage, configuration metadata, and isolated
+component benchmarks for legal move generation, encoding, actor-side MCTS,
+batch materialization, transfers, neural inference, network stages, and one
+training step.
+
+The normal training path is not instrumented. Detailed component measurements
+run only under the benchmark command and are kept separate from the reported
+end-to-end generation and training throughput.
+
 Launch the chess GUI:
 
 ```bash
