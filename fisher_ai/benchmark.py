@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from fisher_ai import trainer as trainer_module
 from fisher_ai.benchmark_metrics import (
     CSV_FIELDS,
     distribution_row,
@@ -18,10 +19,10 @@ from fisher_ai.benchmark_metrics import (
 )
 from fisher_ai.checkpoint import CheckpointManager
 from fisher_ai.config import available_device, load_config
-from fisher_ai.dataset import InMemoryWindow, materialize_mixed_batch
+from fisher_ai.dataset import InMemoryWindow
 from fisher_ai.generation import STATUS_INTERVAL_SECONDS, WindowGenerator
 from fisher_ai.network import FisherNetwork
-from fisher_ai.trainer import EPOCHS_PER_WINDOW, AlphaZeroTrainer
+from fisher_ai.trainer import AlphaZeroTrainer
 
 DEFAULT_BENCHMARK_POSITIONS = 5000
 BENCHMARK_DIR = Path("benchmarks")
@@ -580,15 +581,6 @@ def training_benchmark_rows(timings, elapsed):
         distribution_row(
             "compute",
             "training",
-            "epoch_setup",
-            "elapsed_seconds",
-            timings["epoch_setup"],
-            "seconds",
-            share_base=elapsed,
-        ),
-        distribution_row(
-            "compute",
-            "training",
             "batch_materialization",
             "elapsed_seconds",
             timings["batch_materialization"],
@@ -632,84 +624,73 @@ def training_benchmark_rows(timings, elapsed):
     return rows
 
 
-def run_training_benchmark(trainer, window):
-    """Run existing trainer operations with benchmark-owned timing."""
-    started = time.perf_counter()
-    loss_total = 0.0
-    policy_loss_total = 0.0
-    value_loss_total = 0.0
-    optimizer_steps = 0
-    learning_rate = trainer.learning_rate()
-    fresh_positions = window.position_count
-    replay_per_epoch = 0
-    timings = {
-        "epoch_setup": [],
-        "batch_materialization": [],
-        "train_batch": [],
-        "batch_sizes": [],
-        "legal_widths": [],
-        "batch_bytes": [],
-    }
+class TrainingBenchmarkRecorder:
+    """Time production training calls only while benchmarking."""
 
-    for _ in range(EPOCHS_PER_WINDOW):
-        setup_started = time.perf_counter()
-        fresh_indices = np.arange(fresh_positions, dtype=np.int64)
-        replay_indices = np.empty(0, dtype=np.int64)
-        source_flags = np.concatenate(
-            (
-                np.zeros(fresh_positions, dtype=np.bool_),
-                np.ones(len(replay_indices), dtype=np.bool_),
-            )
+    def __init__(self, trainer):
+        self.trainer = trainer
+        self.original_train_batch = trainer.train_batch
+        self.original_materialize_batch = (
+            trainer_module.materialize_mixed_batch
         )
-        position_indices = np.concatenate((fresh_indices, replay_indices))
-        order = trainer.rng.permutation(len(position_indices))
-        source_flags = source_flags[order]
-        position_indices = position_indices[order]
-        timings["epoch_setup"].append(time.perf_counter() - setup_started)
+        self.timings = {
+            "batch_materialization": [],
+            "train_batch": [],
+            "batch_sizes": [],
+            "legal_widths": [],
+            "batch_bytes": [],
+        }
 
-        for start in range(0, len(order), trainer.batch_size):
-            end = start + trainer.batch_size
-            materialize_started = time.perf_counter()
-            batch = materialize_mixed_batch(
-                window,
-                None,
-                source_flags[start:end],
-                position_indices[start:end],
-            )
-            timings["batch_materialization"].append(
-                time.perf_counter() - materialize_started
-            )
-            timings["batch_sizes"].append(len(batch[0]))
-            timings["legal_widths"].append(batch[1].shape[1])
-            timings["batch_bytes"].append(sum(array.nbytes for array in batch))
+    def materialize_batch(
+        self,
+        fresh_window,
+        replay_window,
+        source_flags,
+        position_indices,
+    ):
+        """Time one benchmark-only production materialization call."""
+        started = time.perf_counter()
+        batch = self.original_materialize_batch(
+            fresh_window,
+            replay_window,
+            source_flags,
+            position_indices,
+        )
+        self.timings["batch_materialization"].append(
+            time.perf_counter() - started
+        )
+        self.timings["batch_sizes"].append(len(batch[0]))
+        self.timings["legal_widths"].append(batch[1].shape[1])
+        self.timings["batch_bytes"].append(
+            sum(array.nbytes for array in batch)
+        )
+        return batch
 
-            batch_started = time.perf_counter()
-            loss, policy_loss, value_loss, learning_rate = trainer.train_batch(
-                batch
-            )
-            timings["train_batch"].append(time.perf_counter() - batch_started)
-            loss_total += loss
-            policy_loss_total += policy_loss
-            value_loss_total += value_loss
-            optimizer_steps += 1
+    def train_batch(self, batch):
+        """Time one benchmark-only production optimizer call."""
+        started = time.perf_counter()
+        result = self.original_train_batch(batch)
+        self.timings["train_batch"].append(time.perf_counter() - started)
+        return result
 
-    elapsed = time.perf_counter() - started
-    positions_per_epoch = fresh_positions + replay_per_epoch
-    positions = positions_per_epoch * EPOCHS_PER_WINDOW
-    metrics = {
-        "elapsed_seconds": elapsed,
-        "epochs": EPOCHS_PER_WINDOW,
-        "positions": positions,
-        "positions_per_second": positions / max(elapsed, 1e-6),
-        "optimizer_steps": optimizer_steps,
-        "loss": loss_total / optimizer_steps,
-        "policy_loss": policy_loss_total / optimizer_steps,
-        "value_loss": value_loss_total / optimizer_steps,
-        "learning_rate": learning_rate,
-        "fresh_positions_per_epoch": fresh_positions,
-        "replay_positions_per_epoch": replay_per_epoch,
-    }
-    rows = training_benchmark_rows(timings, elapsed)
+
+def run_training_benchmark(trainer, window):
+    """Run the production training path with benchmark-only wrappers."""
+    recorder = TrainingBenchmarkRecorder(trainer)
+    trainer.train_batch = recorder.train_batch
+    trainer_module.materialize_mixed_batch = recorder.materialize_batch
+    try:
+        metrics = trainer.train_window(window)
+    finally:
+        trainer.train_batch = recorder.original_train_batch
+        trainer_module.materialize_mixed_batch = (
+            recorder.original_materialize_batch
+        )
+
+    rows = training_benchmark_rows(
+        recorder.timings,
+        metrics["elapsed_seconds"],
+    )
     return metrics, rows
 
 
@@ -750,7 +731,37 @@ def run_benchmark(
             unit="seconds",
         )
     )
-    del model
+
+    trainer_construct_started = time.perf_counter()
+    trainer = AlphaZeroTrainer(
+        model,
+        config.batch_size,
+        device=device,
+        checkpoint_manager=manager,
+    )
+    rows.append(
+        metric_row(
+            "phase",
+            "setup",
+            "trainer_construct",
+            "elapsed_seconds",
+            time.perf_counter() - trainer_construct_started,
+            unit="seconds",
+        )
+    )
+
+    checkpoint_load_started = time.perf_counter()
+    trainer.load_checkpoint(checkpoint_path)
+    rows.append(
+        metric_row(
+            "phase",
+            "setup",
+            "training_checkpoint_load",
+            "elapsed_seconds",
+            time.perf_counter() - checkpoint_load_started,
+            unit="seconds",
+        )
+    )
 
     generator_construct_started = time.perf_counter()
     generator = WindowGenerator(
@@ -807,38 +818,6 @@ def run_benchmark(
             "garbage_collection",
             "elapsed_seconds",
             time.perf_counter() - collection_started,
-            unit="seconds",
-        )
-    )
-
-    trainer_construct_started = time.perf_counter()
-    model = FisherNetwork()
-    trainer = AlphaZeroTrainer(
-        model,
-        config.batch_size,
-        device=device,
-        checkpoint_manager=manager,
-    )
-    rows.append(
-        metric_row(
-            "phase",
-            "setup",
-            "trainer_construct",
-            "elapsed_seconds",
-            time.perf_counter() - trainer_construct_started,
-            unit="seconds",
-        )
-    )
-
-    checkpoint_load_started = time.perf_counter()
-    trainer.load_checkpoint(checkpoint_path)
-    rows.append(
-        metric_row(
-            "phase",
-            "setup",
-            "training_checkpoint_load",
-            "elapsed_seconds",
-            time.perf_counter() - checkpoint_load_started,
             unit="seconds",
         )
     )

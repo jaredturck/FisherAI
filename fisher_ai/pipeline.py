@@ -3,8 +3,6 @@
 import gc
 from pathlib import Path
 
-import torch
-
 from fisher_ai.checkpoint import CheckpointManager
 from fisher_ai.config import available_device, load_config
 from fisher_ai.dataset import ReplayWindow
@@ -48,10 +46,18 @@ class TrainingPipeline:
         self.device = available_device(self.config.device)
         self.manager = CheckpointManager()
         self.notifier = DiscordNotifier()
-        checkpoint_path = self.manager.ensure(FisherNetwork())
+        model = FisherNetwork()
+        checkpoint_path = self.manager.ensure(model)
         self.cumulative_fresh_positions = (
             self.manager.cumulative_fresh_positions(checkpoint_path)
         )
+        self.trainer = AlphaZeroTrainer(
+            model,
+            self.config.batch_size,
+            device=self.device,
+            checkpoint_manager=self.manager,
+        )
+        self.trainer.load_checkpoint(checkpoint_path)
         self.replay = ReplayWindow(REPLAY_CAPACITY)
 
     def run_iteration(self, iteration):
@@ -82,15 +88,7 @@ class TrainingPipeline:
             f"{sampled_replay:,} replay positions per epoch",
             flush=True,
         )
-        model = FisherNetwork()
-        trainer = AlphaZeroTrainer(
-            model,
-            self.config.batch_size,
-            device=self.device,
-            checkpoint_manager=self.manager,
-        )
-        trainer.load_checkpoint(checkpoint_path)
-        training = trainer.train_window(
+        training = self.trainer.train_window(
             window,
             replay_window=self.replay,
             replay_ratio=replay_ratio,
@@ -100,7 +98,7 @@ class TrainingPipeline:
         cumulative_fresh_positions = (
             self.cumulative_fresh_positions + window.position_count
         )
-        trainer.save_checkpoint(cumulative_fresh_positions)
+        self.trainer.save_checkpoint(cumulative_fresh_positions)
         self.cumulative_fresh_positions = cumulative_fresh_positions
 
         oldest_iteration = self.replay.oldest_iteration
@@ -130,12 +128,8 @@ class TrainingPipeline:
             replay_capacity=self.replay.max_positions,
         )
 
-        del trainer
-        del model
         del window
         gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
     def run(self, iterations=None):
         """Run outer training iterations until the requested limit."""

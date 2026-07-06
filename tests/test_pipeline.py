@@ -97,8 +97,13 @@ def test_pipeline_generates_trains_replays_saves_and_notifies(
 
     pipeline = TrainingPipeline(config_path)
     pipeline.run_iteration(1)
+    pipeline.run_iteration(2)
 
+    assert calls.count(("trainer_init", 2, "cpu")) == 1
+    assert calls.count("load") == 1
+    assert calls.count(("train", 4, 0.5)) == 2
     assert calls.index(("generate", 4)) < calls.index(("train", 4, 0.5))
     assert calls.index(("train", 4, 0.5)) < calls.index(("replay", 4, 1))
     assert calls.index(("replay", 4, 1)) < calls.index(("save", 4))
     assert calls.index(("save", 4)) < calls.index("notify")
+    assert ("save", 8) in calls

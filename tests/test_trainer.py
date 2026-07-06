@@ -1,7 +1,14 @@
+import threading
+
+import numpy as np
 import torch
 import torch.nn as nn
 
-from fisher_ai.dataset import InMemoryWindow
+from fisher_ai.dataset import (
+    InMemoryWindow,
+    ReplayWindow,
+    materialize_mixed_batch,
+)
 from fisher_ai.trainer import EPOCHS_PER_WINDOW, AlphaZeroTrainer
 from tests.test_dataset import make_record
 
@@ -104,3 +111,114 @@ def test_trainer_samples_replay_independently_each_epoch():
     assert metrics["replay_positions_per_epoch"] == 2
     assert metrics["positions"] == 18
     assert metrics["optimizer_steps"] == 6
+
+
+def test_prefetched_batches_preserve_serial_batch_contents():
+    fresh = make_window(4)
+    replay = ReplayWindow(8)
+    replay.append_window(make_window(4), 1)
+    replay.append_window(make_window(4), 2)
+    serial_trainer = AlphaZeroTrainer(
+        TinyPolicyValueModel(),
+        batch_size=3,
+        device="cpu",
+    )
+    prefetched_trainer = AlphaZeroTrainer(
+        TinyPolicyValueModel(),
+        batch_size=3,
+        device="cpu",
+    )
+    serial_batches = []
+    for source_flags, position_indices in serial_trainer.batch_indices(
+        fresh.position_count,
+        replay,
+        replay_per_epoch=2,
+    ):
+        serial_batches.append(
+            materialize_mixed_batch(
+                fresh,
+                replay,
+                source_flags,
+                position_indices,
+            )
+        )
+    prefetched_batches = list(
+        prefetched_trainer.prefetched_batches(
+            fresh,
+            replay,
+            fresh.position_count,
+            replay_per_epoch=2,
+        )
+    )
+
+    assert len(prefetched_batches) == len(serial_batches)
+    for serial_batch, prefetched_batch in zip(
+        serial_batches,
+        prefetched_batches,
+        strict=True,
+    ):
+        for serial_array, prefetched_array in zip(
+            serial_batch,
+            prefetched_batch,
+            strict=True,
+        ):
+            np.testing.assert_array_equal(serial_array, prefetched_array)
+
+
+def test_cuda_training_prefetches_materialization_on_one_worker(monkeypatch):
+    trainer = AlphaZeroTrainer(
+        TinyPolicyValueModel(),
+        batch_size=3,
+        device="cpu",
+    )
+    trainer.device = torch.device("cuda")
+    materialize_threads = []
+    trained_batches = []
+
+    def materialize_batch(
+        fresh_window,
+        replay_window,
+        source_flags,
+        position_indices,
+    ):
+        materialize_threads.append(threading.get_ident())
+        return fresh_window.materialize_batch(position_indices)
+
+    def train_batch(batch):
+        trained_batches.append(len(batch[0]))
+        return 1.0, 0.5, 0.5, 0.05
+
+    monkeypatch.setattr(
+        "fisher_ai.trainer.materialize_mixed_batch",
+        materialize_batch,
+    )
+    trainer.train_batch = train_batch
+    metrics = trainer.train_window(make_window(7))
+
+    assert metrics["optimizer_steps"] == 9
+    assert trained_batches == [3, 3, 1] * EPOCHS_PER_WINDOW
+    assert len(set(materialize_threads)) == 1
+    assert materialize_threads[0] != threading.get_ident()
+
+
+def test_cuda_tensor_batch_reuses_pinned_staging_buffers():
+    if not torch.cuda.is_available():
+        return
+
+    trainer = AlphaZeroTrainer(
+        TinyPolicyValueModel(),
+        batch_size=3,
+        device="cuda:0",
+    )
+    batch = make_window(3).materialize_batch(torch.arange(3).numpy())
+    state_buffer = trainer.pinned_states.data_ptr()
+    action_buffer = trainer.pinned_legal_actions.data_ptr()
+
+    tensors = trainer.tensor_batch(batch)
+    torch.cuda.synchronize()
+    trainer.tensor_batch(batch)
+    torch.cuda.synchronize()
+
+    assert trainer.pinned_states.data_ptr() == state_buffer
+    assert trainer.pinned_legal_actions.data_ptr() == action_buffer
+    assert tensors[0].is_contiguous(memory_format=torch.channels_last)

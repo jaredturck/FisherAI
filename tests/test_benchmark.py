@@ -1,7 +1,9 @@
 import csv
 
-from fisher_ai.benchmark import write_reports
+from fisher_ai.benchmark import run_training_benchmark, write_reports
 from fisher_ai.benchmark_metrics import distribution_row, percentile
+from fisher_ai.trainer import AlphaZeroTrainer
+from tests.test_trainer import TinyPolicyValueModel, make_window
 
 
 def benchmark_inputs():
@@ -90,3 +92,25 @@ def test_benchmark_writes_long_format_metrics_and_summary(tmp_path):
     assert "Training epochs: 3" in summary
     assert "Games completed: 25" in summary
     assert "Production training modules are not instrumented" in summary
+
+
+def test_training_benchmark_wraps_the_production_training_path():
+    trainer = AlphaZeroTrainer(
+        TinyPolicyValueModel(),
+        batch_size=3,
+        device="cpu",
+    )
+    original_train_batch = trainer.train_batch
+
+    metrics, rows = run_training_benchmark(trainer, make_window(7))
+
+    materialization = next(
+        row for row in rows if row["component"] == "batch_materialization"
+    )
+    optimizer = next(
+        row for row in rows if row["component"] == "optimizer_batch"
+    )
+    assert metrics["optimizer_steps"] == 9
+    assert materialization["count"] == 9
+    assert optimizer["count"] == 9
+    assert trainer.train_batch == original_train_batch

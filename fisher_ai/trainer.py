@@ -2,12 +2,15 @@
 
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
 from fisher_ai.dataset import materialize_mixed_batch
+from fisher_ai.encoding import INPUT_PLANES
+from fisher_ai.mcts import MAX_LEGAL_ACTIONS
 
 EPOCHS_PER_WINDOW = 3
 MOMENTUM = 0.9
@@ -50,6 +53,43 @@ class AlphaZeroTrainer:
         )
         self.step = 0
         self.rng = np.random.default_rng(RANDOM_SEED)
+
+        self.pinned_states = None
+        self.pinned_legal_actions = None
+        self.pinned_visit_counts = None
+        self.pinned_legal_mask = None
+        self.pinned_values = None
+        if self.device.type == "cuda":
+            self.allocate_transfer_buffers()
+
+    def allocate_transfer_buffers(self):
+        """Allocate reusable pinned staging storage for CUDA transfers."""
+        action_capacity = self.batch_size * MAX_LEGAL_ACTIONS
+        self.pinned_states = torch.empty(
+            (self.batch_size, INPUT_PLANES, 8, 8),
+            dtype=torch.float16,
+            pin_memory=True,
+        )
+        self.pinned_legal_actions = torch.empty(
+            action_capacity,
+            dtype=torch.int64,
+            pin_memory=True,
+        )
+        self.pinned_visit_counts = torch.empty(
+            action_capacity,
+            dtype=torch.float32,
+            pin_memory=True,
+        )
+        self.pinned_legal_mask = torch.empty(
+            action_capacity,
+            dtype=torch.bool,
+            pin_memory=True,
+        )
+        self.pinned_values = torch.empty(
+            self.batch_size,
+            dtype=torch.float32,
+            pin_memory=True,
+        )
 
     def learning_rate(self):
         """Return the scheduled learning rate for the current step."""
@@ -104,20 +144,52 @@ class AlphaZeroTrainer:
         value_loss = F.mse_loss(predicted_values, target_values)
         return policy_loss + value_loss, policy_loss, value_loss
 
+    def cuda_tensor_batch(self, batch):
+        """Stage one NumPy batch in reusable pinned buffers."""
+        batch_size = len(batch[0])
+        legal_width = batch[1].shape[1]
+        action_count = batch_size * legal_width
+
+        states = self.pinned_states[:batch_size]
+        legal_actions = self.pinned_legal_actions[:action_count].view(
+            batch_size,
+            legal_width,
+        )
+        visit_counts = self.pinned_visit_counts[:action_count].view(
+            batch_size,
+            legal_width,
+        )
+        legal_mask = self.pinned_legal_mask[:action_count].view(
+            batch_size,
+            legal_width,
+        )
+        values = self.pinned_values[:batch_size]
+
+        states.copy_(torch.from_numpy(batch[0]))
+        legal_actions.copy_(torch.from_numpy(batch[1]))
+        visit_counts.copy_(torch.from_numpy(batch[2]))
+        legal_mask.copy_(torch.from_numpy(batch[3]))
+        values.copy_(torch.from_numpy(batch[4]))
+
+        return [
+            states.to(
+                self.device,
+                non_blocking=True,
+                memory_format=torch.channels_last,
+            ),
+            legal_actions.to(self.device, non_blocking=True),
+            visit_counts.to(self.device, non_blocking=True),
+            legal_mask.to(self.device, non_blocking=True),
+            values.to(self.device, non_blocking=True),
+        ]
+
     def tensor_batch(self, batch):
         """Transfer one NumPy training batch to device tensors."""
-        tensors = [torch.from_numpy(array) for array in batch]
         if self.device.type == "cuda":
-            tensors = [tensor.pin_memory() for tensor in tensors]
-        tensors = [
-            tensor.to(self.device, non_blocking=True) for tensor in tensors
-        ]
-        if self.device.type == "cpu":
-            tensors[0] = tensors[0].float()
-        if self.channels_last:
-            tensors[0] = tensors[0].contiguous(
-                memory_format=torch.channels_last
-            )
+            return self.cuda_tensor_batch(batch)
+
+        tensors = [torch.from_numpy(array).to(self.device) for array in batch]
+        tensors[0] = tensors[0].float()
         return tensors
 
     def train_batch(self, batch):
@@ -144,21 +216,8 @@ class AlphaZeroTrainer:
             learning_rate,
         )
 
-    def train_window(self, window, replay_window=None, replay_ratio=0.0):
-        """Train for three epochs over fresh data and sampled replay data."""
-        started = time.perf_counter()
-        loss_total = 0.0
-        policy_loss_total = 0.0
-        value_loss_total = 0.0
-        optimizer_steps = 0
-        learning_rate = self.learning_rate()
-        fresh_positions = window.position_count
-        desired_replay = round(fresh_positions * float(replay_ratio))
-        replay_available = (
-            replay_window.position_count if replay_window is not None else 0
-        )
-        replay_per_epoch = min(desired_replay, replay_available)
-
+    def batch_indices(self, fresh_positions, replay_window, replay_per_epoch):
+        """Yield shuffled fresh and replay index slices for every epoch."""
         for _ in range(EPOCHS_PER_WINDOW):
             fresh_indices = np.arange(fresh_positions, dtype=np.int64)
             replay_indices = (
@@ -179,12 +238,70 @@ class AlphaZeroTrainer:
 
             for start in range(0, len(order), self.batch_size):
                 end = start + self.batch_size
-                batch = materialize_mixed_batch(
+                yield source_flags[start:end], position_indices[start:end]
+
+    def prefetched_batches(
+        self,
+        window,
+        replay_window,
+        fresh_positions,
+        replay_per_epoch,
+    ):
+        """Materialize one batch ahead while CUDA trains the current batch."""
+        indices = iter(
+            self.batch_indices(
+                fresh_positions,
+                replay_window,
+                replay_per_epoch,
+            )
+        )
+        first = next(indices, None)
+        if first is None:
+            return
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                materialize_mixed_batch,
+                window,
+                replay_window,
+                first[0],
+                first[1],
+            )
+            for source_flags, position_indices in indices:
+                batch = future.result()
+                future = executor.submit(
+                    materialize_mixed_batch,
                     window,
                     replay_window,
-                    source_flags[start:end],
-                    position_indices[start:end],
+                    source_flags,
+                    position_indices,
                 )
+                yield batch
+            yield future.result()
+
+    def train_window(self, window, replay_window=None, replay_ratio=0.0):
+        """Train for three epochs over fresh data and sampled replay data."""
+        started = time.perf_counter()
+        loss_total = 0.0
+        policy_loss_total = 0.0
+        value_loss_total = 0.0
+        optimizer_steps = 0
+        learning_rate = self.learning_rate()
+        fresh_positions = window.position_count
+        desired_replay = round(fresh_positions * float(replay_ratio))
+        replay_available = (
+            replay_window.position_count if replay_window is not None else 0
+        )
+        replay_per_epoch = min(desired_replay, replay_available)
+
+        if self.device.type == "cuda":
+            batches = self.prefetched_batches(
+                window,
+                replay_window,
+                fresh_positions,
+                replay_per_epoch,
+            )
+            for batch in batches:
                 loss, policy_loss, value_loss, learning_rate = (
                     self.train_batch(batch)
                 )
@@ -192,6 +309,42 @@ class AlphaZeroTrainer:
                 policy_loss_total += policy_loss
                 value_loss_total += value_loss
                 optimizer_steps += 1
+        else:
+            for _ in range(EPOCHS_PER_WINDOW):
+                fresh_indices = np.arange(fresh_positions, dtype=np.int64)
+                replay_indices = (
+                    replay_window.sample_indices(replay_per_epoch, self.rng)
+                    if replay_per_epoch
+                    else np.empty(0, dtype=np.int64)
+                )
+                source_flags = np.concatenate(
+                    (
+                        np.zeros(fresh_positions, dtype=np.bool_),
+                        np.ones(len(replay_indices), dtype=np.bool_),
+                    )
+                )
+                position_indices = np.concatenate(
+                    (fresh_indices, replay_indices)
+                )
+                order = self.rng.permutation(len(position_indices))
+                source_flags = source_flags[order]
+                position_indices = position_indices[order]
+
+                for start in range(0, len(order), self.batch_size):
+                    end = start + self.batch_size
+                    batch = materialize_mixed_batch(
+                        window,
+                        replay_window,
+                        source_flags[start:end],
+                        position_indices[start:end],
+                    )
+                    loss, policy_loss, value_loss, learning_rate = (
+                        self.train_batch(batch)
+                    )
+                    loss_total += loss
+                    policy_loss_total += policy_loss
+                    value_loss_total += value_loss
+                    optimizer_steps += 1
 
         elapsed = time.perf_counter() - started
         positions_per_epoch = fresh_positions + replay_per_epoch
