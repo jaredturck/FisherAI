@@ -1,6 +1,7 @@
 import gc
 import os
 import queue
+import threading
 import time
 from multiprocessing import shared_memory
 from pathlib import Path
@@ -12,55 +13,22 @@ from fisher_ai.checkpoint import CheckpointManager
 from fisher_ai.config import available_device, load_config
 from fisher_ai.dataset import InMemoryWindow
 from fisher_ai.encoding import INPUT_PLANES
+from fisher_ai.game import MAX_GAME_PLIES
 from fisher_ai.mcts import MAX_LEGAL_ACTIONS, MCTS
 from fisher_ai.network import FisherNetwork
 from fisher_ai.self_play import SelfPlayRunner
 
 STATUS_INTERVAL_SECONDS = 10.0
+ACTOR_SESSION_GROUPS = 2
 
 
-class SharedInferenceMemory:
-    def __init__(
-        self,
-        descriptor=None,
-        actor_count=0,
-        max_request_batch=0,
-    ):
+class SharedArrayMemory:
+    def __init__(self, specs, descriptor=None):
         self.owner = descriptor is None
         self.segments = {}
         self.arrays = {}
 
         if self.owner:
-            specs = {
-                "states": (
-                    (actor_count, max_request_batch, INPUT_PLANES, 8, 8),
-                    np.float16,
-                ),
-                "legal_actions": (
-                    (
-                        actor_count,
-                        max_request_batch,
-                        MAX_LEGAL_ACTIONS,
-                    ),
-                    np.uint16,
-                ),
-                "legal_lengths": (
-                    (actor_count, max_request_batch),
-                    np.uint16,
-                ),
-                "policy_logits": (
-                    (
-                        actor_count,
-                        max_request_batch,
-                        MAX_LEGAL_ACTIONS,
-                    ),
-                    np.float32,
-                ),
-                "values": (
-                    (actor_count, max_request_batch),
-                    np.float32,
-                ),
-            }
             self.descriptor = {}
             for name, (shape, dtype) in specs.items():
                 dtype = np.dtype(dtype)
@@ -87,12 +55,6 @@ class SharedInferenceMemory:
                 self.segments[name] = segment
                 self.arrays[name] = array
 
-        self.states = self.arrays["states"]
-        self.legal_actions = self.arrays["legal_actions"]
-        self.legal_lengths = self.arrays["legal_lengths"]
-        self.policy_logits = self.arrays["policy_logits"]
-        self.values = self.arrays["values"]
-
     def close(self):
         for segment in self.segments.values():
             segment.close()
@@ -100,12 +62,127 @@ class SharedInferenceMemory:
     def unlink(self):
         if not self.owner:
             return
-
         for segment in self.segments.values():
             try:
                 segment.unlink()
             except FileNotFoundError:
                 pass
+
+
+class SharedInferenceMemory(SharedArrayMemory):
+    def __init__(
+        self,
+        descriptor=None,
+        actor_count=0,
+        slot_count=ACTOR_SESSION_GROUPS,
+        max_request_batch=0,
+    ):
+        specs = {
+            "states": (
+                (
+                    actor_count,
+                    slot_count,
+                    max_request_batch,
+                    INPUT_PLANES,
+                    8,
+                    8,
+                ),
+                np.float16,
+            ),
+            "legal_actions": (
+                (
+                    actor_count,
+                    slot_count,
+                    max_request_batch,
+                    MAX_LEGAL_ACTIONS,
+                ),
+                np.int64,
+            ),
+            "legal_lengths": (
+                (actor_count, slot_count, max_request_batch),
+                np.uint16,
+            ),
+            "policy_logits": (
+                (
+                    actor_count,
+                    slot_count,
+                    max_request_batch,
+                    MAX_LEGAL_ACTIONS,
+                ),
+                np.float32,
+            ),
+            "values": (
+                (actor_count, slot_count, max_request_batch),
+                np.float32,
+            ),
+        }
+        super().__init__(specs, descriptor=descriptor)
+        self.states = self.arrays["states"]
+        self.legal_actions = self.arrays["legal_actions"]
+        self.legal_lengths = self.arrays["legal_lengths"]
+        self.policy_logits = self.arrays["policy_logits"]
+        self.values = self.arrays["values"]
+
+
+class SharedGameMemory(SharedArrayMemory):
+    def __init__(
+        self,
+        descriptor=None,
+        actor_count=0,
+        slot_count=ACTOR_SESSION_GROUPS,
+    ):
+        leading = (actor_count, slot_count, MAX_GAME_PLIES)
+        specs = {
+            "snapshot_bitboards": ((*leading, 12), np.uint64),
+            "snapshot_repetitions": (leading, np.uint8),
+            "current_colors": (leading, np.bool_),
+            "plies": (leading, np.uint16),
+            "castling_masks": (leading, np.uint8),
+            "halfmove_clocks": (leading, np.uint8),
+            "legal_lengths": (leading, np.uint16),
+            "legal_actions": (
+                (*leading, MAX_LEGAL_ACTIONS),
+                np.uint16,
+            ),
+            "visit_counts": (
+                (*leading, MAX_LEGAL_ACTIONS),
+                np.uint16,
+            ),
+            "values": (leading, np.float32),
+        }
+        super().__init__(specs, descriptor=descriptor)
+        for name, array in self.arrays.items():
+            setattr(self, name, array)
+
+    def write(self, actor_id, slot_id, game):
+        count = game.position_count
+        key = (actor_id, slot_id, slice(0, count))
+        self.snapshot_bitboards[key] = game.snapshot_bitboards
+        self.snapshot_repetitions[key] = game.snapshot_repetitions
+        self.current_colors[key] = game.current_colors
+        self.plies[key] = game.plies
+        self.castling_masks[key] = game.castling_masks
+        self.halfmove_clocks[key] = game.halfmove_clocks
+        self.legal_lengths[key] = game.legal_lengths
+        self.legal_actions[key] = game.legal_actions
+        self.visit_counts[key] = game.visit_counts
+        self.values[key] = game.values
+        return count
+
+    def append_to_window(self, window, actor_id, slot_id, count):
+        key = (actor_id, slot_id, slice(0, count))
+        window.add_arrays(
+            self.snapshot_bitboards[key],
+            self.snapshot_repetitions[key],
+            self.current_colors[key],
+            self.plies[key],
+            self.castling_masks[key],
+            self.halfmove_clocks[key],
+            self.legal_lengths[key],
+            self.legal_actions[key],
+            self.visit_counts[key],
+            self.values[key],
+        )
 
 
 class GenerationCancelled(Exception):
@@ -116,17 +193,19 @@ class RemoteEvaluator:
     def __init__(
         self,
         actor_id,
+        slot_id,
         request_queue,
         response_queue,
-        shared_descriptor,
+        shared,
         stop_event,
     ):
         self.actor_id = actor_id
+        self.slot_id = slot_id
         self.request_queue = request_queue
         self.response_queue = response_queue
-        self.shared = SharedInferenceMemory(descriptor=shared_descriptor)
+        self.shared = shared
         self.stop_event = stop_event
-        self.max_request_batch = self.shared.states.shape[1]
+        self.max_request_batch = self.shared.states.shape[2]
         self.request_id = 0
 
     def evaluate_encoded(self, encoded_states, legal_actions, legal_lengths):
@@ -152,20 +231,23 @@ class RemoteEvaluator:
     def evaluate_chunk(self, encoded_states, legal_actions, legal_lengths):
         batch_size = len(encoded_states)
         max_actions = int(legal_lengths.max(initial=0))
-        self.shared.states[self.actor_id, :batch_size] = encoded_states
+        actor_id = self.actor_id
+        slot_id = self.slot_id
+        self.shared.states[actor_id, slot_id, :batch_size] = encoded_states
         self.shared.legal_lengths[
-            self.actor_id,
+            actor_id,
+            slot_id,
             :batch_size,
         ] = legal_lengths
         self.shared.legal_actions[
-            self.actor_id,
+            actor_id,
+            slot_id,
             :batch_size,
-            :max_actions,
-        ] = legal_actions[:, :max_actions]
+        ] = legal_actions
 
         self.request_id += 1
         request_id = self.request_id
-        request = (self.actor_id, batch_size, request_id)
+        request = (actor_id, slot_id, batch_size, request_id)
 
         while not self.stop_event.is_set():
             try:
@@ -193,22 +275,25 @@ class RemoteEvaluator:
             raise RuntimeError(error)
         if response_id != request_id:
             raise RuntimeError(
-                f"Inference response mismatch for actor {self.actor_id}: "
-                f"expected {request_id}, received {response_id}"
+                f"Inference response mismatch for actor {actor_id}, "
+                f"slot {slot_id}: expected {request_id}, "
+                f"received {response_id}"
             )
         if error:
             raise RuntimeError(error)
 
         policies = self.shared.policy_logits[
-            self.actor_id,
+            actor_id,
+            slot_id,
             :batch_size,
             :max_actions,
         ].copy()
-        values = self.shared.values[self.actor_id, :batch_size].copy()
+        values = self.shared.values[
+            actor_id,
+            slot_id,
+            :batch_size,
+        ].copy()
         return policies, values
-
-    def close(self):
-        self.shared.close()
 
 
 def configure_worker_threads():
@@ -243,6 +328,53 @@ def load_inference_model(device, checkpoint_path):
     return model
 
 
+def collect_requests(
+    request_queue,
+    first_request,
+    target_batch,
+    maximum_batch,
+    wait_seconds,
+):
+    requests = [first_request]
+    state_count = first_request[2]
+    deferred_request = None
+    should_exit = False
+    deadline = time.monotonic() + wait_seconds
+
+    while state_count < target_batch:
+        timeout = deadline - time.monotonic()
+        if timeout <= 0:
+            break
+        try:
+            request = request_queue.get(timeout=timeout)
+        except queue.Empty:
+            break
+        if request is None:
+            should_exit = True
+            break
+        if state_count + request[2] > maximum_batch:
+            deferred_request = request
+            break
+        requests.append(request)
+        state_count += request[2]
+
+    while state_count < maximum_batch and not should_exit:
+        try:
+            request = request_queue.get_nowait()
+        except queue.Empty:
+            break
+        if request is None:
+            should_exit = True
+            break
+        if state_count + request[2] > maximum_batch:
+            deferred_request = request
+            break
+        requests.append(request)
+        state_count += request[2]
+
+    return requests, state_count, deferred_request, should_exit
+
+
 def inference_server_main(
     device_name,
     config_path,
@@ -257,8 +389,9 @@ def inference_server_main(
     server_ready,
 ):
     configure_worker_threads()
-    for response_queue in response_queues:
-        response_queue.cancel_join_thread()
+    for actor_queues in response_queues:
+        for response_queue in actor_queues:
+            response_queue.cancel_join_thread()
 
     config = load_config(config_path)
     device = torch.device(available_device(device_name))
@@ -280,6 +413,7 @@ def inference_server_main(
             dtype=torch.int64,
             pin_memory=device.type == "cuda",
         )
+        lengths = np.empty(maximum_batch, dtype=np.int64)
         batch_wait_seconds = config.inference_batch_wait_ms / 1000.0
         deferred_request = None
         should_exit = False
@@ -293,60 +427,49 @@ def inference_server_main(
             if request is None:
                 break
 
-            requests = [request]
-            state_count = request[1]
-            assert state_count <= maximum_batch
-            deadline = time.monotonic() + batch_wait_seconds
-
-            while state_count < target_batch:
-                timeout = deadline - time.monotonic()
-                if timeout <= 0:
-                    break
-                try:
-                    next_request = request_queue.get(timeout=timeout)
-                except queue.Empty:
-                    break
-
-                if next_request is None:
-                    should_exit = True
-                    break
-                if state_count + next_request[1] > maximum_batch:
-                    deferred_request = next_request
-                    break
-
-                requests.append(next_request)
-                state_count += next_request[1]
+            (
+                requests,
+                state_count,
+                deferred_request,
+                should_exit,
+            ) = collect_requests(
+                request_queue,
+                request,
+                target_batch,
+                maximum_batch,
+                batch_wait_seconds,
+            )
 
             offset = 0
             request_offsets = []
-            lengths = np.zeros(state_count, dtype=np.int64)
             max_legal_moves = 0
-            pinned_actions[:state_count].zero_()
-
-            for actor_id, batch_size, request_id in requests:
+            for actor_id, slot_id, batch_size, request_id in requests:
                 end = offset + batch_size
                 pinned_states[offset:end].copy_(
-                    torch.from_numpy(shared.states[actor_id, :batch_size])
+                    torch.from_numpy(
+                        shared.states[actor_id, slot_id, :batch_size]
+                    )
                 )
                 actor_lengths = shared.legal_lengths[
                     actor_id,
+                    slot_id,
                     :batch_size,
-                ].astype(np.int64, copy=True)
+                ]
                 lengths[offset:end] = actor_lengths
                 actor_max = int(actor_lengths.max(initial=0))
                 max_legal_moves = max(max_legal_moves, actor_max)
-
-                if actor_max:
-                    pinned_actions[offset:end, :actor_max].copy_(
-                        torch.from_numpy(
-                            shared.legal_actions[
-                                actor_id,
-                                :batch_size,
-                                :actor_max,
-                            ].astype(np.int64, copy=False)
-                        )
+                pinned_actions[offset:end].copy_(
+                    torch.from_numpy(
+                        shared.legal_actions[
+                            actor_id,
+                            slot_id,
+                            :batch_size,
+                        ]
                     )
-                request_offsets.append((actor_id, request_id, offset, end))
+                )
+                request_offsets.append(
+                    (actor_id, slot_id, request_id, offset, end, actor_max)
+                )
                 offset = end
 
             states = pinned_states[:state_count].to(
@@ -375,15 +498,26 @@ def inference_server_main(
             gathered = gathered.float().cpu().numpy()
             values = values.float().cpu().numpy()
 
-            for actor_id, request_id, start, end in request_offsets:
-                for local_index, length in enumerate(lengths[start:end]):
-                    shared.policy_logits[
-                        actor_id,
-                        local_index,
-                        :length,
-                    ] = gathered[start + local_index, :length]
-                shared.values[actor_id, : end - start] = values[start:end]
-                response_queues[actor_id].put((request_id, None))
+            for (
+                actor_id,
+                slot_id,
+                request_id,
+                start,
+                end,
+                actor_max,
+            ) in request_offsets:
+                shared.policy_logits[
+                    actor_id,
+                    slot_id,
+                    : end - start,
+                    :actor_max,
+                ] = gathered[start:end, :actor_max]
+                shared.values[
+                    actor_id,
+                    slot_id,
+                    : end - start,
+                ] = values[start:end]
+                response_queues[actor_id][slot_id].put((request_id, None))
 
             inference_batches.value += 1
             inference_positions.value += state_count
@@ -396,11 +530,12 @@ def inference_server_main(
         server_ready.value = -1
         stop_event.set()
         message = f"Inference server failed: {error}"
-        for response_queue in response_queues:
-            try:
-                response_queue.put_nowait((-1, message))
-            except queue.Full:
-                pass
+        for actor_queues in response_queues:
+            for response_queue in actor_queues:
+                try:
+                    response_queue.put_nowait((-1, message))
+                except queue.Full:
+                    pass
         raise
     finally:
         if model is not None:
@@ -410,23 +545,88 @@ def inference_server_main(
         shared.close()
 
 
-def put_completed_game(target_queue, game, stop_event):
+def put_game_message(game_queue, message, stop_event):
     while not stop_event.is_set():
         try:
-            target_queue.put(game, timeout=0.5)
+            game_queue.put(message, timeout=0.5)
             return True
         except queue.Full:
             continue
     return False
 
 
-def actor_main(
+def wait_for_game_ack(ack_queue, stop_event):
+    while not stop_event.is_set():
+        try:
+            ack_queue.get(timeout=0.5)
+            return True
+        except queue.Empty:
+            continue
+    return False
+
+
+def actor_session_worker(
     actor_id,
-    config_path,
-    shared_descriptor,
+    slot_id,
+    config,
+    inference_shared,
+    game_shared,
     request_queue,
     response_queue,
     game_queue,
+    game_ack_queue,
+    stop_event,
+    games_per_group,
+    error_queue,
+):
+    evaluator = RemoteEvaluator(
+        actor_id,
+        slot_id,
+        request_queue,
+        response_queue,
+        inference_shared,
+        stop_event,
+    )
+    search = MCTS(
+        evaluator,
+        simulations=config.simulations,
+        parallel_searches=config.parallel_searches,
+        seed=7 + actor_id * ACTOR_SESSION_GROUPS + slot_id,
+    )
+    runner = SelfPlayRunner(
+        search,
+        seed=7 + actor_id * ACTOR_SESSION_GROUPS + slot_id,
+    )
+    sessions = [runner.create_session() for _ in range(games_per_group)]
+
+    try:
+        while not stop_event.is_set():
+            finished_indices = runner.advance_sessions(sessions)
+            for index in finished_indices:
+                record = sessions[index].build_record()
+                count = game_shared.write(actor_id, slot_id, record)
+                message = (actor_id, slot_id, count)
+                if not put_game_message(game_queue, message, stop_event):
+                    return
+                if not wait_for_game_ack(game_ack_queue, stop_event):
+                    return
+                sessions[index] = runner.create_session()
+    except GenerationCancelled:
+        return
+    except Exception as error:
+        error_queue.put(repr(error))
+        stop_event.set()
+
+
+def actor_main(
+    actor_id,
+    config_path,
+    inference_descriptor,
+    game_descriptor,
+    request_queue,
+    response_queues,
+    game_queue,
+    game_ack_queues,
     stop_event,
     games_per_actor,
 ):
@@ -435,38 +635,52 @@ def actor_main(
     game_queue.cancel_join_thread()
     pin_actor_to_cpu(actor_id)
     config = load_config(config_path)
-
-    evaluator = RemoteEvaluator(
-        actor_id,
-        request_queue,
-        response_queue,
-        shared_descriptor,
-        stop_event,
-    )
-    search = MCTS(
-        evaluator,
-        simulations=config.simulations,
-        parallel_searches=config.parallel_searches,
-        seed=7 + actor_id,
-    )
-    runner = SelfPlayRunner(search, seed=7 + actor_id)
-    sessions = [runner.create_session() for _ in range(games_per_actor)]
+    inference_shared = SharedInferenceMemory(descriptor=inference_descriptor)
+    game_shared = SharedGameMemory(descriptor=game_descriptor)
+    error_queue = queue.Queue()
+    workers = []
 
     try:
-        while not stop_event.is_set():
-            finished_indices = runner.advance_sessions(sessions)
-            for index in finished_indices:
-                record = sessions[index].build_record()
-                if not put_completed_game(game_queue, record, stop_event):
-                    return
-                sessions[index] = runner.create_session()
-    except GenerationCancelled:
-        return
-    except Exception:
-        stop_event.set()
-        raise
+        for slot_id in range(ACTOR_SESSION_GROUPS):
+            games_per_group = games_per_actor // ACTOR_SESSION_GROUPS
+            if slot_id < games_per_actor % ACTOR_SESSION_GROUPS:
+                games_per_group += 1
+            if not games_per_group:
+                continue
+
+            worker = threading.Thread(
+                target=actor_session_worker,
+                args=(
+                    actor_id,
+                    slot_id,
+                    config,
+                    inference_shared,
+                    game_shared,
+                    request_queue,
+                    response_queues[slot_id],
+                    game_queue,
+                    game_ack_queues[slot_id],
+                    stop_event,
+                    games_per_group,
+                    error_queue,
+                ),
+                daemon=True,
+            )
+            worker.start()
+            workers.append(worker)
+
+        while any(worker.is_alive() for worker in workers):
+            try:
+                error = error_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            raise RuntimeError(error)
     finally:
-        evaluator.close()
+        stop_event.set() if not error_queue.empty() else None
+        for worker in workers:
+            worker.join(timeout=1)
+        inference_shared.close()
+        game_shared.close()
 
 
 def round_request_capacity(value):
@@ -490,30 +704,45 @@ class WindowGenerator:
         self.games_per_actor = self.config.games_per_actor
         self.device = available_device(self.config.device)
         self.checkpoint_path = str(Path(checkpoint_path).resolve())
+        largest_group = (
+            self.games_per_actor + ACTOR_SESSION_GROUPS - 1
+        ) // ACTOR_SESSION_GROUPS
         self.request_capacity = round_request_capacity(
-            self.games_per_actor * self.config.parallel_searches
+            largest_group * self.config.parallel_searches
         )
         if self.request_capacity > self.config.inference_max_batch_size:
             raise ValueError(
                 f"Actor request capacity {self.request_capacity} exceeds "
-                f"inference_max_batch_size="
+                "inference_max_batch_size="
                 f"{self.config.inference_max_batch_size}"
             )
 
         self.stop_event = self.context.Event()
         self.request_queue = self.context.Queue(
-            maxsize=max(self.actor_count * 4, 8)
+            maxsize=max(self.actor_count * ACTOR_SESSION_GROUPS * 4, 8)
         )
         self.response_queues = [
-            self.context.Queue(maxsize=2) for _ in range(self.actor_count)
+            [
+                self.context.Queue(maxsize=2)
+                for _ in range(ACTOR_SESSION_GROUPS)
+            ]
+            for _ in range(self.actor_count)
         ]
         self.game_queue = self.context.Queue(
-            maxsize=max(self.actor_count * 2, 8)
+            maxsize=max(self.actor_count * ACTOR_SESSION_GROUPS * 2, 8)
         )
+        self.game_ack_queues = [
+            [
+                self.context.Queue(maxsize=1)
+                for _ in range(ACTOR_SESSION_GROUPS)
+            ]
+            for _ in range(self.actor_count)
+        ]
         self.shared = SharedInferenceMemory(
             actor_count=self.actor_count,
             max_request_batch=self.request_capacity,
         )
+        self.game_shared = SharedGameMemory(actor_count=self.actor_count)
         self.inference_batches = self.context.Value("q", 0, lock=False)
         self.inference_positions = self.context.Value("q", 0, lock=False)
         self.inference_max_batch = self.context.Value("q", 0, lock=False)
@@ -521,6 +750,10 @@ class WindowGenerator:
         self.actor_processes = []
         self.server_process = None
         self.started = False
+
+    @property
+    def active_game_count(self):
+        return self.actor_count * self.games_per_actor
 
     def start(self):
         if self.started:
@@ -570,9 +803,11 @@ class WindowGenerator:
                     actor_id,
                     self.config_path,
                     self.shared.descriptor,
+                    self.game_shared.descriptor,
                     self.request_queue,
                     self.response_queues[actor_id],
                     self.game_queue,
+                    self.game_ack_queues[actor_id],
                     self.stop_event,
                     self.games_per_actor,
                 ),
@@ -593,6 +828,14 @@ class WindowGenerator:
             "max_batch": int(self.inference_max_batch.value),
         }
 
+    def consume_game(self, window, timeout=None):
+        if timeout is None:
+            actor_id, slot_id, count = self.game_queue.get_nowait()
+        else:
+            actor_id, slot_id, count = self.game_queue.get(timeout=timeout)
+        self.game_shared.append_to_window(window, actor_id, slot_id, count)
+        self.game_ack_queues[actor_id][slot_id].put(None)
+
     def generate(self, target_positions, timeout=None, progress=True):
         window = InMemoryWindow(target_positions)
         started = time.monotonic()
@@ -606,7 +849,7 @@ class WindowGenerator:
                 print(
                     f"Generating {target_positions:,} positions with "
                     f"{self.actor_count} actors, "
-                    f"{self.actor_count * self.games_per_actor} active games, "
+                    f"{self.active_game_count} active games, "
                     f"and {self.device}",
                     flush=True,
                 )
@@ -624,11 +867,10 @@ class WindowGenerator:
                     )
 
                 try:
-                    game = self.game_queue.get(timeout=0.5)
+                    self.consume_game(window, timeout=0.5)
                 except queue.Empty:
                     continue
 
-                window.add_game(game)
                 now = time.monotonic()
                 if progress and now - last_status >= STATUS_INTERVAL_SECONDS:
                     current = self.metric_snapshot()
@@ -644,7 +886,7 @@ class WindowGenerator:
                         f"{target_positions:,} "
                         f"positions/s={positions_per_second:.1f} "
                         f"evals/s={evaluations_per_second:.1f} "
-                        f"games={len(window.games):,}",
+                        f"games={window.game_count:,}",
                         flush=True,
                     )
                     previous_positions = window.position_count
@@ -658,7 +900,7 @@ class WindowGenerator:
         metrics.update(
             {
                 "elapsed_seconds": elapsed,
-                "games": len(window.games),
+                "games": window.game_count,
                 "positions_per_second": (
                     window.position_count / max(elapsed, 1e-6)
                 ),
@@ -677,6 +919,8 @@ class WindowGenerator:
         if not self.started:
             self.shared.close()
             self.shared.unlink()
+            self.game_shared.close()
+            self.game_shared.unlink()
             return
 
         self.stop_event.set()
@@ -685,7 +929,7 @@ class WindowGenerator:
         while any(process.is_alive() for process in self.actor_processes):
             if drain_window is not None:
                 try:
-                    drain_window.add_game(self.game_queue.get(timeout=0.1))
+                    self.consume_game(drain_window, timeout=0.1)
                 except queue.Empty:
                     pass
             else:
@@ -705,7 +949,7 @@ class WindowGenerator:
         if drain_window is not None:
             while True:
                 try:
-                    drain_window.add_game(self.game_queue.get_nowait())
+                    self.consume_game(drain_window)
                 except queue.Empty:
                     break
 
@@ -722,20 +966,29 @@ class WindowGenerator:
 
         self.request_queue.cancel_join_thread()
         self.request_queue.close()
-        for response_queue in self.response_queues:
-            response_queue.cancel_join_thread()
-            response_queue.close()
+        for actor_queues in self.response_queues:
+            for response_queue in actor_queues:
+                response_queue.cancel_join_thread()
+                response_queue.close()
         self.game_queue.cancel_join_thread()
         self.game_queue.close()
+        for actor_queues in self.game_ack_queues:
+            for ack_queue in actor_queues:
+                ack_queue.cancel_join_thread()
+                ack_queue.close()
         self.shared.close()
         self.shared.unlink()
+        self.game_shared.close()
+        self.game_shared.unlink()
         self.started = False
 
     def release_ipc(self):
         self.request_queue = None
         self.response_queues = []
         self.game_queue = None
+        self.game_ack_queues = []
         self.shared = None
+        self.game_shared = None
         self.stop_event = None
         self.inference_batches = None
         self.inference_positions = None

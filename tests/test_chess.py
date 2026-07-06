@@ -24,13 +24,22 @@ def test_complex_castling_position_perft_depth_two():
     assert perft(board, 2) == 1779
 
 
+def test_packed_move_round_trip():
+    move = chess.move_from_uci("a7a8n")
+
+    assert chess.move_to_uci(move) == "a7a8n"
+    assert chess.move_from_square(move) == 48
+    assert chess.move_to_square(move) == 56
+    assert chess.move_promotion(move) == chess.KNIGHT
+
+
 def test_castling_moves_and_rook_relocation():
     board = chess.Board("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1")
-    moves = {move.uci() for move in board.legal_moves}
+    moves = {chess.move_to_uci(move) for move in board.legal_moves}
     assert "e1g1" in moves
     assert "e1c1" in moves
 
-    board.push(chess.Move.from_uci("e1g1"))
+    board.push(chess.move_from_uci("e1g1"))
     assert board.piece_type_at(6) == chess.KING
     assert board.piece_type_at(5) == chess.ROOK
     assert not board.has_kingside_castling_rights(chess.WHITE)
@@ -39,8 +48,10 @@ def test_castling_moves_and_rook_relocation():
 
 def test_en_passant_capture_removes_the_pawn():
     board = chess.Board("8/8/8/3pP3/8/8/8/4K2k w - d6 0 1")
-    move = chess.Move.from_uci("e5d6")
-    assert move.uci() in {legal_move.uci() for legal_move in board.legal_moves}
+    move = chess.move_from_uci("e5d6")
+    assert "e5d6" in {
+        chess.move_to_uci(legal_move) for legal_move in board.legal_moves
+    }
 
     board.push(move)
     assert board.piece_type_at(43) == chess.PAWN
@@ -49,7 +60,7 @@ def test_en_passant_capture_removes_the_pawn():
 
 def test_promotion_replaces_the_pawn():
     board = chess.Board("7k/P7/8/8/8/8/8/7K w - - 0 1")
-    board.push(chess.Move.from_uci("a7a8n"))
+    board.push(chess.move_from_uci("a7a8n"))
     assert board.piece_type_at(56) == chess.KNIGHT
 
 
@@ -71,3 +82,4 @@ def test_position_key_ignores_non_capturable_en_passant_square():
         "rnbqkbnr/pppp1ppp/8/4p3/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 2"
     )
     assert with_ep.position_key() == without_ep.position_key()
+    assert with_ep.position_hash() == without_ep.position_hash()

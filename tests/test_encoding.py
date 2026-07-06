@@ -1,7 +1,12 @@
 import numpy as np
 
 from fisher_ai import chess
-from fisher_ai.encoding import ACTION_SIZE, encode_state, move_to_action
+from fisher_ai.encoding import (
+    ACTION_SIZE,
+    encode_state,
+    encode_states,
+    move_to_action,
+)
 from fisher_ai.game import GameState
 
 
@@ -17,6 +22,16 @@ def test_initial_state_has_expected_shape_and_piece_counts():
     assert encoded[115, 0, 0] == 1
     assert encoded[116, 0, 0] == 1
     assert encoded[117, 0, 0] == 1
+
+
+def test_batch_encoding_matches_single_state_encoding():
+    states = [GameState(), GameState()]
+    states[1].push(chess.move_from_uci("e2e4"))
+
+    batch = encode_states(states)
+
+    np.testing.assert_array_equal(batch[0], encode_state(states[0]))
+    np.testing.assert_array_equal(batch[1], encode_state(states[1]))
 
 
 def test_black_to_move_is_rotated_to_current_player_perspective():
@@ -46,14 +61,14 @@ def test_legal_moves_have_unique_action_indices():
 
 def test_castling_and_underpromotions_use_distinct_actions():
     castling_action = move_to_action(
-        chess.Move.from_uci("e1g1"),
+        chess.move_from_uci("e1g1"),
         chess.WHITE,
     )
     promotions = [
-        move_to_action(chess.Move.from_uci("a7a8n"), chess.WHITE),
-        move_to_action(chess.Move.from_uci("a7a8b"), chess.WHITE),
-        move_to_action(chess.Move.from_uci("a7a8r"), chess.WHITE),
-        move_to_action(chess.Move.from_uci("a7a8q"), chess.WHITE),
+        move_to_action(chess.move_from_uci("a7a8n"), chess.WHITE),
+        move_to_action(chess.move_from_uci("a7a8b"), chess.WHITE),
+        move_to_action(chess.move_from_uci("a7a8r"), chess.WHITE),
+        move_to_action(chess.move_from_uci("a7a8q"), chess.WHITE),
     ]
 
     assert len(set(promotions)) == 4
@@ -65,40 +80,41 @@ def test_repetition_planes_mark_second_and_third_occurrence():
     moves = ("g1f3", "g8f6", "f3g1", "f6g8")
 
     for move in moves:
-        state.push(chess.Move.from_uci(move))
+        state.push(chess.move_from_uci(move))
 
     current_frame = encode_state(state)[98:112]
     assert np.all(current_frame[12] == 1)
     assert np.all(current_frame[13] == 0)
 
     for move in moves:
-        state.push(chess.Move.from_uci(move))
+        state.push(chess.move_from_uci(move))
 
     current_frame = encode_state(state)[98:112]
     assert np.all(current_frame[12] == 1)
     assert np.all(current_frame[13] == 1)
 
 
-def test_game_state_copy_shares_immutable_history_snapshots():
+def test_game_state_copy_owns_independent_dense_arrays():
     state = GameState()
-    state.push(chess.Move.from_uci("e2e4"))
+    state.push(chess.move_from_uci("e2e4"))
     copied = state.copy()
 
     original_key = state.board.position_key()
-    assert list(state.history)[-1] is list(copied.history)[-1]
-    copied.push(chess.Move.from_uci("e7e5"))
+    assert not np.shares_memory(
+        state.history_bitboards,
+        copied.history_bitboards,
+    )
+    copied.push(chess.move_from_uci("e7e5"))
     assert state.board.position_key() == original_key
     assert copied.board.position_key() != original_key
 
 
-def test_cached_repetition_count_does_not_recompute_the_position_key(
-    monkeypatch,
-):
+def test_cached_repetition_count_does_not_recompute_position_hash(monkeypatch):
     state = GameState()
 
-    def fail_position_key(board):
-        raise AssertionError("position key should not be recomputed")
+    def fail_position_hash(board):
+        raise AssertionError("position hash should not be recomputed")
 
-    monkeypatch.setattr(chess.Board, "position_key", fail_position_key)
+    monkeypatch.setattr(chess.Board, "position_hash", fail_position_hash)
 
     assert state.current_repetition_count() == 1

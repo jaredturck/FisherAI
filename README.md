@@ -14,6 +14,13 @@ The generation phase uses CPU actor processes and one GPU inference server.
 The training phase starts only after generation has stopped, then uses the same
 configured GPU.
 
+## Performance architecture
+
+The self-play hot path uses packed integer moves, dense MCTS state and history
+pools, batched state encoding, two inference slots per actor, and shared-array
+completed-game transfer. Generated training data is retained in a contiguous
+structure-of-arrays window so batches are assembled through indexed gathers.
+
 ## Commands
 
 Run continuous training:

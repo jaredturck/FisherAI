@@ -13,7 +13,7 @@ class UniformEvaluator:
         return policies, values
 
 
-def test_self_play_builds_compact_policy_and_value_targets():
+def test_self_play_builds_array_policy_and_value_targets():
     search = MCTS(
         UniformEvaluator(),
         simulations=4,
@@ -23,18 +23,15 @@ def test_self_play_builds_compact_policy_and_value_targets():
     runner = SelfPlayRunner(search, seed=3)
     session = runner.create_session()
     session.state = GameState(chess.Board("6k1/5Q2/6K1/8/8/8/8/8 w - - 0 1"))
-    session.snapshots = [session.state.history[-1]]
 
     while not session.finished:
         runner.advance_sessions([session])
 
     game = session.build_record()
 
-    assert game.samples
-    assert len(game.snapshots) == len(game.samples) + 1
-    assert game.materialize_state(0).shape == (119, 8, 8)
-    assert all(sample.legal_actions.size for sample in game.samples)
-    assert all(sample.visit_counts.sum() > 0 for sample in game.samples)
-    assert set(sample.value for sample in game.samples).issubset(
-        {-1.0, 0.0, 1.0}
-    )
+    assert game.position_count > 0
+    assert game.snapshot_bitboards.shape == (game.position_count, 12)
+    assert game.legal_actions.shape[1] == 256
+    assert np.all(game.legal_lengths > 0)
+    assert np.all(game.visit_counts.sum(axis=1) > 0)
+    assert set(game.values.tolist()).issubset({-1.0, 0.0, 1.0})

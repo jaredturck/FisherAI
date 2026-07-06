@@ -29,7 +29,7 @@ def test_gui_defaults_promotion_to_queen():
 
     move = gui.choose_human_move(48, 56)
 
-    assert move == chess.Move.from_uci("a7a8q")
+    assert move == chess.move_from_uci("a7a8q")
 
 
 def test_gui_has_offsets_for_every_piece():
@@ -53,10 +53,10 @@ def test_gui_castles_by_clicking_king_destination_or_rook():
     gui = object.__new__(ChessGUI)
     gui.state = GameState(chess.Board("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1"))
 
-    assert gui.choose_human_move(4, 6) == chess.Move.from_uci("e1g1")
-    assert gui.choose_human_move(4, 7) == chess.Move.from_uci("e1g1")
-    assert gui.choose_human_move(4, 2) == chess.Move.from_uci("e1c1")
-    assert gui.choose_human_move(4, 0) == chess.Move.from_uci("e1c1")
+    assert gui.choose_human_move(4, 6) == chess.move_from_uci("e1g1")
+    assert gui.choose_human_move(4, 7) == chess.move_from_uci("e1g1")
+    assert gui.choose_human_move(4, 2) == chess.move_from_uci("e1c1")
+    assert gui.choose_human_move(4, 0) == chess.move_from_uci("e1c1")
 
 
 class FakeTree:
@@ -91,7 +91,7 @@ class FakeSearch:
 def test_gui_engine_move_uses_current_mcts_api():
     gui = object.__new__(ChessGUI)
     state = GameState()
-    move = chess.Move.from_uci("e7e5")
+    move = chess.move_from_uci("e7e5")
     tree = FakeTree(move)
     gui.search = FakeSearch(tree, action=123)
     gui.engine_results = queue.Queue()

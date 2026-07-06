@@ -1,62 +1,95 @@
-from collections import deque
-
 import numpy as np
 
 from fisher_ai import chess
 
 MAX_GAME_PLIES = 320
-
-
-class PositionSnapshot:
-    def __init__(self, board, repetition_count):
-        self.repetition_count = int(repetition_count)
-        white = board.occupied_co[chess.WHITE]
-        black = board.occupied_co[chess.BLACK]
-        self.bitboards = np.asarray(
-            (
-                board.pawns & white,
-                board.knights & white,
-                board.bishops & white,
-                board.rooks & white,
-                board.queens & white,
-                board.kings & white,
-                board.pawns & black,
-                board.knights & black,
-                board.bishops & black,
-                board.rooks & black,
-                board.queens & black,
-                board.kings & black,
-            ),
-            dtype=np.uint64,
-        )
+HISTORY_LENGTH = 8
+PIECE_PLANES = 12
 
 
 class GameState:
+    __slots__ = (
+        "board",
+        "history_bitboards",
+        "history_repetitions",
+        "history_length",
+        "position_hashes",
+        "position_hash_length",
+        "repetition_count",
+    )
+
     def __init__(self, board=None):
         self.board = board.copy() if board else chess.Board()
-        self.repetition_counts = {}
-        self.history = deque(maxlen=8)
-
-        key = self.board.position_key()
-        self.repetition_counts[key] = 1
+        self.history_bitboards = np.zeros(
+            (HISTORY_LENGTH, PIECE_PLANES),
+            dtype=np.uint64,
+        )
+        self.history_repetitions = np.zeros(
+            HISTORY_LENGTH,
+            dtype=np.uint8,
+        )
+        self.history_length = 0
+        self.position_hashes = np.zeros(
+            MAX_GAME_PLIES + 1,
+            dtype=np.uint64,
+        )
+        self.position_hash_length = 1
+        self.position_hashes[0] = self.board.position_hash()
         self.repetition_count = 1
-        self.history.append(PositionSnapshot(self.board, 1))
+        self._append_snapshot(1)
 
     def copy(self):
         state = object.__new__(GameState)
         state.board = self.board.copy()
-        state.repetition_counts = self.repetition_counts.copy()
+        state.history_bitboards = self.history_bitboards.copy()
+        state.history_repetitions = self.history_repetitions.copy()
+        state.history_length = self.history_length
+        state.position_hashes = self.position_hashes.copy()
+        state.position_hash_length = self.position_hash_length
         state.repetition_count = self.repetition_count
-        state.history = deque(self.history, maxlen=8)
         return state
+
+    def copy_from(self, other):
+        self.board.copy_from(other.board)
+        self.history_bitboards[:] = other.history_bitboards
+        self.history_repetitions[:] = other.history_repetitions
+        self.history_length = other.history_length
+        self.position_hashes[:] = other.position_hashes
+        self.position_hash_length = other.position_hash_length
+        self.repetition_count = other.repetition_count
+        return self
+
+    def _append_snapshot(self, repetition_count):
+        if self.history_length < HISTORY_LENGTH:
+            row = self.history_length
+            self.history_length += 1
+        else:
+            self.history_bitboards[:-1] = self.history_bitboards[1:]
+            self.history_repetitions[:-1] = self.history_repetitions[1:]
+            row = HISTORY_LENGTH - 1
+
+        self.board.fill_piece_bitboards(self.history_bitboards[row])
+        self.history_repetitions[row] = repetition_count
 
     def push(self, move):
         self.board.push(move)
-        key = self.board.position_key()
-        count = self.repetition_counts.get(key, 0) + 1
-        self.repetition_counts[key] = count
+        position_hash = self.board.position_hash()
+        length = self.position_hash_length
+        self.position_hashes[length] = position_hash
+        self.position_hash_length = length + 1
+        count = int(
+            np.count_nonzero(
+                self.position_hashes[: length + 1] == position_hash
+            )
+        )
         self.repetition_count = count
-        self.history.append(PositionSnapshot(self.board, count))
+        self._append_snapshot(count)
+
+    def current_bitboards(self, output=None):
+        if output is None:
+            output = np.empty(PIECE_PLANES, dtype=np.uint64)
+        output[:] = self.history_bitboards[self.history_length - 1]
+        return output
 
     def current_repetition_count(self):
         return self.repetition_count
@@ -73,7 +106,7 @@ class GameState:
     def is_terminal(self):
         if self.is_rule_draw():
             return True
-        return not any(self.board.legal_moves)
+        return not bool(self.board.legal_moves)
 
     def terminal_value(self):
         return -1.0 if self.board.is_check() else 0.0

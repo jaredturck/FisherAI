@@ -1,11 +1,9 @@
 import torch
 import torch.nn as nn
 
-from fisher_ai import chess
-from fisher_ai.dataset import GameRecord, InMemoryWindow, PositionTarget
-from fisher_ai.encoding import castling_rights_mask
-from fisher_ai.game import GameState
+from fisher_ai.dataset import InMemoryWindow
 from fisher_ai.trainer import EPOCHS_PER_WINDOW, AlphaZeroTrainer
+from tests.test_dataset import make_record
 
 
 class TinyPolicyValueModel(nn.Module):
@@ -34,29 +32,8 @@ class HalfPrecisionPolicyModel(nn.Module):
 
 
 def make_window(position_count):
-    state = GameState()
-    snapshots = [state.history[-1]]
-    samples = []
-    moves = ("e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "g8f6", "d2d3")
-
-    for index in range(position_count):
-        samples.append(
-            PositionTarget(
-                state.board.turn,
-                state.board.ply(),
-                castling_rights_mask(state.board),
-                state.board.halfmove_clock,
-                [1, 2, 3],
-                [4, 2, 1],
-                value=1,
-            )
-        )
-        if index + 1 < position_count:
-            state.push(chess.Move.from_uci(moves[index]))
-            snapshots.append(state.history[-1])
-
     window = InMemoryWindow(position_count)
-    window.add_game(GameRecord(snapshots, samples))
+    window.add_game(make_record(position_count, action_count=3))
     return window
 
 

@@ -35,9 +35,10 @@ def test_self_play_batches_sessions_into_shared_inference_calls():
     assert evaluator.batch_sizes == [2, 2]
 
 
-def test_remote_evaluator_submits_one_shared_memory_request():
+def test_remote_evaluator_uses_dedicated_shared_memory_slot():
     shared = SharedInferenceMemory(
         actor_count=1,
+        slot_count=2,
         max_request_batch=64,
     )
     stop_event = threading.Event()
@@ -45,9 +46,10 @@ def test_remote_evaluator_submits_one_shared_memory_request():
     response_queue = queue.Queue()
     evaluator = RemoteEvaluator(
         0,
+        1,
         request_queue,
         response_queue,
-        shared.descriptor,
+        shared,
         stop_event,
     )
     result = []
@@ -62,10 +64,12 @@ def test_remote_evaluator_submits_one_shared_memory_request():
     thread.start()
 
     try:
-        actor_id, batch_size, request_id = request_queue.get(timeout=2)
-        assert (actor_id, batch_size) == (0, 40)
-        shared.policy_logits[0, :40, 0] = 1.0
-        shared.values[0, :40] = 0.5
+        actor_id, slot_id, batch_size, request_id = request_queue.get(
+            timeout=2
+        )
+        assert (actor_id, slot_id, batch_size) == (0, 1, 40)
+        shared.policy_logits[0, 1, :40, 0] = 1.0
+        shared.values[0, 1, :40] = 0.5
         response_queue.put((request_id, None))
         thread.join(timeout=2)
 
@@ -74,6 +78,5 @@ def test_remote_evaluator_submits_one_shared_memory_request():
         assert np.allclose(result[0][1], 0.5)
     finally:
         stop_event.set()
-        evaluator.close()
         shared.close()
         shared.unlink()

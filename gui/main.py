@@ -210,34 +210,41 @@ class ChessGUI:
         return [
             move
             for move in self.state.board.legal_moves
-            if move.from_square == square
+            if chess.move_from_square(move) == square
         ]
 
     def castling_rook_square(self, move):
-        if self.piece_at(move.from_square) != (
+        if self.piece_at(chess.move_from_square(move)) != (
             self.state.board.turn,
             chess.KING,
         ):
             return None
-        if abs(move.to_square - move.from_square) != 2:
+        if abs(chess.move_to_square(move) - chess.move_from_square(move)) != 2:
             return None
 
-        rank_start = move.from_square - chess.square_file(move.from_square)
-        return rank_start + (7 if move.to_square > move.from_square else 0)
+        rank_start = chess.move_from_square(move) - chess.square_file(
+            chess.move_from_square(move)
+        )
+        return rank_start + (
+            7
+            if chess.move_to_square(move) > chess.move_from_square(move)
+            else 0
+        )
 
     def choose_human_move(self, from_square, to_square):
         legal_moves = list(self.state.board.legal_moves)
         candidates = [
             move
             for move in legal_moves
-            if move.from_square == from_square and move.to_square == to_square
+            if chess.move_from_square(move) == from_square
+            and chess.move_to_square(move) == to_square
         ]
 
         if not candidates:
             candidates = [
                 move
                 for move in legal_moves
-                if move.from_square == from_square
+                if chess.move_from_square(move) == from_square
                 and self.castling_rook_square(move) == to_square
             ]
 
@@ -245,7 +252,7 @@ class ChessGUI:
             return None
 
         for move in candidates:
-            if move.promotion == chess.QUEEN:
+            if chess.move_promotion(move) == chess.QUEEN:
                 return move
 
         return candidates[0]
@@ -287,7 +294,9 @@ class ChessGUI:
     def select_square(self, square):
         moves = self.legal_moves_from(square)
         self.selected_square = square
-        self.legal_destinations = {move.to_square for move in moves}
+        self.legal_destinations = {
+            chess.move_to_square(move) for move in moves
+        }
         self.legal_destinations.update(
             rook_square
             for move in moves
@@ -301,7 +310,7 @@ class ChessGUI:
     def play_move(self, move):
         self.state.push(move)
         self.last_move = move
-        self.move_history.append(move.uci())
+        self.move_history.append(chess.move_to_uci(move))
         self.update_status()
 
     def start_engine_move(self):
@@ -372,8 +381,8 @@ class ChessGUI:
                 )
 
                 if self.last_move and square in (
-                    self.last_move.from_square,
-                    self.last_move.to_square,
+                    chess.move_from_square(self.last_move),
+                    chess.move_to_square(self.last_move),
                 ):
                     color = LAST_MOVE
                 if square == self.selected_square:

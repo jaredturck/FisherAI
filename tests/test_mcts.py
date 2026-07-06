@@ -2,7 +2,7 @@ import numpy as np
 
 from fisher_ai import chess
 from fisher_ai.game import GameState
-from fisher_ai.mcts import MCTS
+from fisher_ai.mcts import MCTS, MCTSStatePool
 
 
 class UniformEvaluator:
@@ -109,10 +109,8 @@ def test_expanded_nodes_keep_cached_game_states():
     )
 
     assert len(expanded_nodes) > 1
-    assert all(
-        tree.state_cache[int(node_id)] is not None
-        for node_id in expanded_nodes
-    )
+    assert np.all(tree.state_slots[expanded_nodes] >= 0)
+    assert tree.state_pool.count >= len(expanded_nodes)
 
 
 def test_terminal_leaf_values_are_cached():
@@ -125,3 +123,27 @@ def test_terminal_leaf_values_are_cached():
     tree = search.run([state])[0]
 
     assert np.isfinite(tree.terminal_values[: tree.next_free]).any()
+
+
+def test_dense_state_pool_counts_root_and_cached_path_repetitions():
+    state = GameState()
+    for move in (
+        "g1f3",
+        "g8f6",
+        "f3g1",
+        "f6g8",
+        "g1f3",
+        "g8f6",
+        "f3g1",
+        "f6g8",
+    ):
+        state.push(chess.move_from_uci(move))
+
+    pool = MCTSStatePool(8)
+    root_slot = pool.store_root(state)
+    position_hash = int(state.position_hashes[state.position_hash_length - 1])
+
+    assert pool.repetition_count_for(root_slot, position_hash) == 3
+
+    child_slot = pool.store_child(state, root_slot, position_hash)
+    assert pool.repetition_count_for(child_slot, position_hash) == 4
