@@ -1,10 +1,10 @@
-"""Save and restore the single FisherAI training checkpoint."""
+"""Save and restore FisherAI training checkpoints."""
 
-import os
 from pathlib import Path
-
+import os
+import shutil
+import time
 import torch
-
 
 class CheckpointManager:
     """Manage atomic saves and restores of the latest checkpoint."""
@@ -24,6 +24,23 @@ class CheckpointManager:
         if not self.path.exists():
             self.save(model, 0, cumulative_fresh_positions=0)
         return self.path
+
+    def save_history(self):
+        """Keep the five previous checkpoints."""
+        if not self.path.exists():
+            return
+
+        history_path = self.directory / f"history-{time.time_ns()}.pt"
+        shutil.copyfile(self.path, history_path)
+
+        history_files = sorted(
+            filename
+            for filename in os.listdir(self.directory)
+            if filename.startswith("history-") and filename.endswith(".pt")
+        )
+
+        while len(history_files) > 5:
+            os.remove(self.directory / history_files.pop(0))
 
     def save(
         self,
@@ -45,6 +62,7 @@ class CheckpointManager:
             payload["scaler"] = scaler.state_dict()
 
         torch.save(payload, self.pending_path)
+        self.save_history()
         os.replace(self.pending_path, self.path)
         return self.path
 
