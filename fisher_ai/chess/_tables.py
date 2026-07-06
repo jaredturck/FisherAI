@@ -10,6 +10,7 @@ SQUARE_NAMES = tuple(
 
 
 def parse_square(name):
+    """Convert an algebraic square name into its board index."""
     if (
         len(name) != 2
         or name[0] not in FILE_NAMES
@@ -20,18 +21,22 @@ def parse_square(name):
 
 
 def square_name(square):
+    """Convert a board index into its algebraic square name."""
     return SQUARE_NAMES[square]
 
 
 def square_file(square):
+    """Return the file index of a board square."""
     return square & 7
 
 
 def square_rank(square):
+    """Return the rank index of a board square."""
     return square >> 3
 
 
 def square_distance(a, b):
+    """Return the Chebyshev distance between two squares."""
     return max(
         abs(square_file(a) - square_file(b)),
         abs(square_rank(a) - square_rank(b)),
@@ -93,6 +98,7 @@ BB_RANKS = (
 
 
 def scan_reversed(bitboard):
+    """Yield occupied squares from highest to lowest index."""
     while bitboard:
         square = bitboard.bit_length() - 1
         yield square
@@ -100,6 +106,7 @@ def scan_reversed(bitboard):
 
 
 def msb(bitboard):
+    """Return the highest occupied square in a bitboard."""
     return bitboard.bit_length() - 1
 
 
@@ -204,10 +211,12 @@ BB_RAYS = _build_rays()
 
 
 def ray(a, b):
+    """Return the complete aligned ray through two squares."""
     return BB_RAYS[a][b]
 
 
 def between(a, b):
+    """Return the squares strictly between two aligned squares."""
     bitboard = BB_RAYS[a][b] & ((BB_ALL << a) ^ (BB_ALL << b))
     return bitboard & (bitboard - 1)
 

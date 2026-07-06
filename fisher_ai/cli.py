@@ -1,3 +1,5 @@
+"""Define the FisherAI command-line interface."""
+
 import argparse
 
 import torch
@@ -7,10 +9,12 @@ from fisher_ai.pipeline import TrainingPipeline
 
 
 def command_train(args):
+    """Run the continuous or bounded training pipeline."""
     TrainingPipeline(args.config).run(iterations=args.iterations)
 
 
 def command_benchmark(args):
+    """Run the configured generation and training benchmark."""
     results, csv_path, markdown_path = run_benchmark(
         config_path=args.config,
         positions=args.positions,
@@ -27,13 +31,15 @@ def command_benchmark(args):
     print(f"Summary: {markdown_path}")
 
 
-def command_gui(args):
-    from gui.main import main
+def command_gui(_args):
+    """Launch the interactive chess interface."""
+    from gui.main import main as run_gui
 
-    main()
+    run_gui()
 
 
 def build_parser():
+    """Build the command-line parser and subcommands."""
     parser = argparse.ArgumentParser(prog="python -m fisher_ai")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -62,6 +68,7 @@ def build_parser():
 
 
 def main():
+    """Parse command-line arguments and dispatch the selected command."""
     parser = build_parser()
     args = parser.parse_args()
     torch.set_float32_matmul_precision("high")

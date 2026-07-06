@@ -138,6 +138,7 @@ PROMOTION_TO_SYMBOL = ("", "n", "b", "r", "q")
 
 
 def encode_move(from_square, to_square, promotion=None):
+    """Pack move coordinates and promotion into the engine move format."""
     promotion_code = 0 if not promotion else int(promotion) - 1
     return (
         int(from_square)
@@ -147,31 +148,38 @@ def encode_move(from_square, to_square, promotion=None):
 
 
 def move_from_square(move):
+    """Return the source square encoded in a packed move."""
     return int(move) & FROM_MASK
 
 
 def move_to_square(move):
+    """Return the destination square encoded in a packed move."""
     return int(move) >> TO_SHIFT & TO_MASK
 
 
 def move_promotion_code(move):
+    """Return the promotion code encoded in a packed move."""
     return int(move) >> PROMOTION_SHIFT & 7
 
 
 def move_promotion(move):
+    """Return the promoted piece encoded in a packed move."""
     code = move_promotion_code(move)
     return None if code == 0 else code + 1
 
 
 def move_piece(move):
+    """Return the moving piece encoded in an annotated move."""
     return int(move) >> MOVING_PIECE_SHIFT & 7
 
 
 def move_captured_piece(move):
+    """Return the captured piece encoded in an annotated move."""
     return int(move) >> CAPTURED_PIECE_SHIFT & 7
 
 
 def move_to_uci(move):
+    """Convert a packed move into UCI notation."""
     value = square_name(move_from_square(move)) + square_name(
         move_to_square(move)
     )
@@ -182,6 +190,7 @@ def move_to_uci(move):
 
 
 def move_from_uci(uci):
+    """Parse UCI notation into a packed move."""
     if len(uci) not in (4, 5):
         raise ValueError(f"expected UCI move of length 4 or 5: {uci!r}")
 
@@ -203,6 +212,7 @@ def move_from_uci(uci):
 
 
 def canonical_square(square, current_color):
+    """Orient a square from the current player perspective."""
     return square if current_color == WHITE else 63 - square
 
 
@@ -248,36 +258,47 @@ def _calculate_action(from_square, to_square, promotion, current_color):
 
 
 PACKED_MOVE_COUNT = 1 << 15
-PACKED_ACTION_LOOKUP = np.full((2, PACKED_MOVE_COUNT), -1, dtype=np.int16)
-for color in (BLACK, WHITE):
-    for from_square in range(64):
-        for to_square in range(64):
-            base = from_square | to_square << TO_SHIFT
-            PACKED_ACTION_LOOKUP[int(color), base] = _calculate_action(
-                from_square,
-                to_square,
-                None,
-                color,
-            )
-            for promotion_code in range(1, 5):
-                promotion = promotion_code + 1
-                base = (
-                    from_square
-                    | to_square << TO_SHIFT
-                    | promotion_code << PROMOTION_SHIFT
-                )
-                action_promotion = (
-                    promotion if promotion in UNDERPROMOTION_PIECES else None
-                )
-                PACKED_ACTION_LOOKUP[int(color), base] = _calculate_action(
+
+
+def _build_action_lookup():
+    """Build the packed move-to-policy-action lookup table."""
+    lookup = np.full((2, PACKED_MOVE_COUNT), -1, dtype=np.int16)
+    for color in (BLACK, WHITE):
+        for from_square in range(64):
+            for to_square in range(64):
+                base = from_square | to_square << TO_SHIFT
+                lookup[int(color), base] = _calculate_action(
                     from_square,
                     to_square,
-                    action_promotion,
+                    None,
                     color,
                 )
+                for promotion_code in range(1, 5):
+                    promotion = promotion_code + 1
+                    base = (
+                        from_square
+                        | to_square << TO_SHIFT
+                        | promotion_code << PROMOTION_SHIFT
+                    )
+                    action_promotion = (
+                        promotion
+                        if promotion in UNDERPROMOTION_PIECES
+                        else None
+                    )
+                    lookup[int(color), base] = _calculate_action(
+                        from_square,
+                        to_square,
+                        action_promotion,
+                        color,
+                    )
+    return lookup
+
+
+PACKED_ACTION_LOOKUP = _build_action_lookup()
 
 
 def move_to_action(move, current_color):
+    """Map a packed move to its neural policy action."""
     base_move = int(move) & MOVE_BASE_MASK
     action = int(PACKED_ACTION_LOOKUP[int(current_color), base_move])
     if action < 0:
@@ -286,6 +307,8 @@ def move_to_action(move, current_color):
 
 
 class Board:
+    """Represent and update one standard chess position with bitboards."""
+
     __slots__ = (
         "pawns",
         "knights",
@@ -312,6 +335,7 @@ class Board:
             self.set_fen(fen)
 
     def reset(self):
+        """Reset the board to the standard starting position."""
         self.pawns = BB_RANK_2 | BB_RANK_7
         self.knights = (
             BB_SQUARES[1] | BB_SQUARES[6] | BB_SQUARES[57] | BB_SQUARES[62]
@@ -334,6 +358,7 @@ class Board:
         self.zobrist_hash = self._compute_zobrist()
 
     def clear(self):
+        """Reset every board field to an empty position."""
         self.pawns = BB_EMPTY
         self.knights = BB_EMPTY
         self.bishops = BB_EMPTY
@@ -352,11 +377,13 @@ class Board:
         self.zobrist_hash = 0
 
     def copy(self):
+        """Return an independent copy of the board."""
         board = object.__new__(Board)
         board.occupied_co = [BB_EMPTY, BB_EMPTY]
         return board.copy_from(self)
 
     def copy_from(self, other):
+        """Overwrite this board with another board state."""
         self.pawns = other.pawns
         self.knights = other.knights
         self.bishops = other.bishops
@@ -376,6 +403,7 @@ class Board:
         return self
 
     def fill_piece_bitboards(self, output):
+        """Write the twelve color-piece bitboards into an output array."""
         white = self.occupied_co[WHITE]
         black = self.occupied_co[BLACK]
         output[0] = self.pawns & white
@@ -393,6 +421,7 @@ class Board:
         return output
 
     def piece_type_at(self, square):
+        """Return the piece type occupying a square."""
         mask = BB_SQUARES[square]
         if not self.occupied & mask:
             return None
@@ -409,6 +438,7 @@ class Board:
         return KING
 
     def color_at(self, square):
+        """Return the color occupying a square."""
         mask = BB_SQUARES[square]
         if self.occupied_co[WHITE] & mask:
             return WHITE
@@ -417,6 +447,7 @@ class Board:
         return None
 
     def king(self, color):
+        """Return the king square for one color."""
         king_mask = self.kings & self.occupied_co[color]
         return msb(king_mask) if king_mask else None
 
@@ -477,6 +508,7 @@ class Board:
         self.zobrist_hash ^= ZOBRIST_PIECES[int(color)][piece_type - 1][square]
 
     def attacks_mask(self, square):
+        """Return every square attacked by the piece on a square."""
         square_mask = BB_SQUARES[square]
         if square_mask & self.pawns:
             color = bool(square_mask & self.occupied_co[WHITE])
@@ -501,6 +533,7 @@ class Board:
         return attacks
 
     def attackers_mask(self, color, square, occupied=None):
+        """Return pieces of one color attacking a square."""
         occupied = self.occupied if occupied is None else occupied
         rank_pieces = BB_RANK_MASKS[square] & occupied
         file_pieces = BB_FILE_MASKS[square] & occupied
@@ -519,9 +552,11 @@ class Board:
         return attackers & self.occupied_co[color]
 
     def is_attacked_by(self, color, square, occupied=None):
+        """Report whether one color attacks a square."""
         return bool(self.attackers_mask(color, square, occupied))
 
     def pin_mask(self, color, square):
+        """Return the legal movement ray for a potentially pinned piece."""
         king = self.king(color)
         if king is None:
             return BB_ALL
@@ -552,6 +587,7 @@ class Board:
         return BB_ALL
 
     def checkers_mask(self):
+        """Return the enemy pieces checking the side to move."""
         king = self.king(self.turn)
         return (
             BB_EMPTY
@@ -560,16 +596,19 @@ class Board:
         )
 
     def is_check(self):
+        """Report whether the side to move is in check."""
         return bool(self.checkers_mask())
 
     @staticmethod
     def is_castling(move):
+        """Report whether a packed move is a castling move."""
         move = int(move)
         if move & CASTLING_FLAG:
             return True
         return abs((move >> TO_SHIFT & TO_MASK) - (move & FROM_MASK)) == 2
 
     def is_en_passant(self, move):
+        """Report whether a packed move is an en passant capture."""
         move = int(move)
         if move & EN_PASSANT_FLAG:
             return True
@@ -1030,6 +1069,7 @@ class Board:
         return count
 
     def fill_legal_moves(self, output, actions=None):
+        """Write legal moves and policy actions into reusable buffers."""
         king = self.king(self.turn)
         if king is None:
             candidate_count = self._fill_pseudo_legal_moves(output)
@@ -1156,9 +1196,11 @@ class Board:
         return value
 
     def position_hash(self):
+        """Return the incrementally maintained repetition hash."""
         return self.zobrist_hash
 
     def push(self, move):
+        """Apply one packed move and update all board state."""
         move = int(move)
         from_square = move_from_square(move)
         to_square = move_to_square(move)
@@ -1253,6 +1295,7 @@ class Board:
             self.zobrist_hash ^= ZOBRIST_EP_FILE[self.ep_hash_file]
 
     def has_insufficient_material(self, color):
+        """Report whether one side lacks sufficient mating material."""
         if self.occupied_co[color] & (self.pawns | self.rooks | self.queens):
             return False
 
@@ -1271,9 +1314,11 @@ class Board:
         return True
 
     def is_insufficient_material(self):
+        """Report whether neither side can force checkmate by material."""
         return all(self.has_insufficient_material(color) for color in COLORS)
 
     def set_fen(self, fen):
+        """Replace the board state from a six-field FEN string."""
         parts = fen.strip().split()
         if len(parts) != 6:
             raise ValueError(f"expected six FEN fields: {fen!r}")

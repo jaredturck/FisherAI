@@ -1,3 +1,5 @@
+"""Benchmark FisherAI self-play generation and model training."""
+
 import csv
 import gc
 from datetime import datetime
@@ -16,6 +18,7 @@ BENCHMARK_DIR = Path("benchmarks")
 
 
 def write_reports(output_dir, window_positions, generation, training):
+    """Write the current benchmark CSV and Markdown reports."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = output_dir / "benchmark_results.csv"
@@ -86,6 +89,7 @@ def run_benchmark(
     positions=None,
     output_dir=BENCHMARK_DIR,
 ):
+    """Run one fixed generation and training benchmark."""
     config = load_config(config_path)
     positions = positions or DEFAULT_BENCHMARK_POSITIONS
     manager = CheckpointManager()

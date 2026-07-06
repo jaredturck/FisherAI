@@ -1,4 +1,7 @@
+"""Generate self-play windows with multiprocessing and shared inference."""
+
 import gc
+import multiprocessing as mp
 import os
 import queue
 import threading
@@ -23,6 +26,8 @@ ACTOR_SESSION_GROUPS = 2
 
 
 class SharedArrayMemory:
+    """Own or attach named NumPy arrays backed by shared memory."""
+
     def __init__(self, specs, descriptor=None):
         self.owner = descriptor is None
         self.segments = {}
@@ -56,10 +61,12 @@ class SharedArrayMemory:
                 self.arrays[name] = array
 
     def close(self):
+        """Close every attached shared-memory segment."""
         for segment in self.segments.values():
             segment.close()
 
     def unlink(self):
+        """Unlink every owned shared-memory segment."""
         if not self.owner:
             return
         for segment in self.segments.values():
@@ -70,6 +77,8 @@ class SharedArrayMemory:
 
 
 class SharedInferenceMemory(SharedArrayMemory):
+    """Expose shared request and response arrays for neural inference."""
+
     def __init__(
         self,
         descriptor=None,
@@ -125,6 +134,8 @@ class SharedInferenceMemory(SharedArrayMemory):
 
 
 class SharedGameMemory(SharedArrayMemory):
+    """Expose shared arrays used to transfer completed games."""
+
     def __init__(
         self,
         descriptor=None,
@@ -151,10 +162,19 @@ class SharedGameMemory(SharedArrayMemory):
             "values": (leading, np.float32),
         }
         super().__init__(specs, descriptor=descriptor)
-        for name, array in self.arrays.items():
-            setattr(self, name, array)
+        self.snapshot_bitboards = self.arrays["snapshot_bitboards"]
+        self.snapshot_repetitions = self.arrays["snapshot_repetitions"]
+        self.current_colors = self.arrays["current_colors"]
+        self.plies = self.arrays["plies"]
+        self.castling_masks = self.arrays["castling_masks"]
+        self.halfmove_clocks = self.arrays["halfmove_clocks"]
+        self.legal_lengths = self.arrays["legal_lengths"]
+        self.legal_actions = self.arrays["legal_actions"]
+        self.visit_counts = self.arrays["visit_counts"]
+        self.values = self.arrays["values"]
 
     def write(self, actor_id, slot_id, game):
+        """Write one completed game into its actor transfer slot."""
         count = game.position_count
         key = (actor_id, slot_id, slice(0, count))
         self.snapshot_bitboards[key] = game.snapshot_bitboards
@@ -170,6 +190,7 @@ class SharedGameMemory(SharedArrayMemory):
         return count
 
     def append_to_window(self, window, actor_id, slot_id, count):
+        """Append one shared game slot into the training window."""
         key = (actor_id, slot_id, slice(0, count))
         window.add_arrays(
             self.snapshot_bitboards[key],
@@ -186,10 +207,14 @@ class SharedGameMemory(SharedArrayMemory):
 
 
 class GenerationCancelled(Exception):
+    """Signal that self-play generation was intentionally cancelled."""
+
     pass
 
 
 class RemoteEvaluator:
+    """Submit encoded positions to the shared inference server."""
+
     def __init__(
         self,
         actor_id,
@@ -209,6 +234,7 @@ class RemoteEvaluator:
         self.request_id = 0
 
     def evaluate_encoded(self, encoded_states, legal_actions, legal_lengths):
+        """Evaluate an encoded batch through chunked shared requests."""
         batch_size = len(encoded_states)
         policies = np.empty(
             (batch_size, legal_actions.shape[1]),
@@ -229,6 +255,7 @@ class RemoteEvaluator:
         return policies, values
 
     def evaluate_chunk(self, encoded_states, legal_actions, legal_lengths):
+        """Submit one inference chunk and collect its outputs."""
         batch_size = len(encoded_states)
         max_actions = int(legal_lengths.max(initial=0))
         actor_id = self.actor_id
@@ -297,6 +324,7 @@ class RemoteEvaluator:
 
 
 def configure_worker_threads():
+    """Limit numerical libraries to one thread per actor process."""
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["MKL_NUM_THREADS"] = "1"
     os.environ["OPENBLAS_NUM_THREADS"] = "1"
@@ -306,6 +334,7 @@ def configure_worker_threads():
 
 
 def pin_actor_to_cpu(actor_id):
+    """Pin one actor process to an available CPU core."""
     if not hasattr(os, "sched_setaffinity"):
         return
 
@@ -318,6 +347,7 @@ def pin_actor_to_cpu(actor_id):
 
 
 def load_inference_model(device, checkpoint_path):
+    """Load the inference network and optional checkpoint weights."""
     model = FisherNetwork()
     CheckpointManager().load(model, path=checkpoint_path, device=device)
     model.to(device)
@@ -335,6 +365,7 @@ def collect_requests(
     maximum_batch,
     wait_seconds,
 ):
+    """Drain compatible inference requests into one server batch."""
     requests = [first_request]
     state_count = first_request[2]
     deferred_request = None
@@ -388,6 +419,7 @@ def inference_server_main(
     inference_max_batch,
     server_ready,
 ):
+    """Serve batched GPU inference requests until generation stops."""
     configure_worker_threads()
     for actor_queues in response_queues:
         for response_queue in actor_queues:
@@ -546,6 +578,7 @@ def inference_server_main(
 
 
 def put_game_message(game_queue, message, stop_event):
+    """Queue a completed-game message while respecting cancellation."""
     while not stop_event.is_set():
         try:
             game_queue.put(message, timeout=0.5)
@@ -556,6 +589,7 @@ def put_game_message(game_queue, message, stop_event):
 
 
 def wait_for_game_ack(ack_queue, stop_event):
+    """Wait until the parent acknowledges a transferred game slot."""
     while not stop_event.is_set():
         try:
             ack_queue.get(timeout=0.5)
@@ -579,6 +613,7 @@ def actor_session_worker(
     games_per_group,
     error_queue,
 ):
+    """Generate games for one actor session group."""
     evaluator = RemoteEvaluator(
         actor_id,
         slot_id,
@@ -630,6 +665,7 @@ def actor_main(
     stop_event,
     games_per_actor,
 ):
+    """Run both self-play session groups for one actor process."""
     configure_worker_threads()
     request_queue.cancel_join_thread()
     game_queue.cancel_join_thread()
@@ -676,7 +712,8 @@ def actor_main(
                 continue
             raise RuntimeError(error)
     finally:
-        stop_event.set() if not error_queue.empty() else None
+        if not error_queue.empty():
+            stop_event.set()
         for worker in workers:
             worker.join(timeout=1)
         inference_shared.close()
@@ -684,19 +721,20 @@ def actor_main(
 
 
 def round_request_capacity(value):
+    """Round an actor request capacity to an efficient boundary."""
     if value <= 32:
         return max(1, value)
     return ((value + 31) // 32) * 32
 
 
 class WindowGenerator:
+    """Coordinate actors and inference to produce one self-play window."""
+
     def __init__(
         self,
         config_path="fisher_config.json",
         checkpoint_path=None,
     ):
-        import multiprocessing as mp
-
         self.context = mp.get_context("spawn")
         self.config_path = str(Path(config_path).resolve())
         self.config = load_config(self.config_path)
@@ -753,9 +791,11 @@ class WindowGenerator:
 
     @property
     def active_game_count(self):
+        """Return the total number of concurrently active games."""
         return self.actor_count * self.games_per_actor
 
     def start(self):
+        """Start shared inference and self-play actor processes."""
         if self.started:
             return
 
@@ -816,12 +856,14 @@ class WindowGenerator:
             self.actor_processes.append(process)
 
     def process_failure(self):
+        """Raise the first failure reported by a child process."""
         for process in [self.server_process, *self.actor_processes]:
             if process is not None and process.exitcode is not None:
                 return f"{process.name} exited with code {process.exitcode}"
         return None
 
     def metric_snapshot(self):
+        """Return current neural inference throughput metrics."""
         return {
             "evaluations": int(self.inference_positions.value),
             "batches": int(self.inference_batches.value),
@@ -829,6 +871,7 @@ class WindowGenerator:
         }
 
     def consume_game(self, window, timeout=None):
+        """Consume one completed game into the active window."""
         if timeout is None:
             actor_id, slot_id, count = self.game_queue.get_nowait()
         else:
@@ -837,6 +880,7 @@ class WindowGenerator:
         self.game_ack_queues[actor_id][slot_id].put(None)
 
     def generate(self, target_positions, timeout=None, progress=True):
+        """Generate a fresh in-memory window of self-play positions."""
         window = InMemoryWindow(target_positions)
         started = time.monotonic()
         last_status = started
@@ -916,6 +960,7 @@ class WindowGenerator:
         return window, metrics
 
     def stop(self, drain_window=None):
+        """Stop child processes and optionally drain completed games."""
         if not self.started:
             self.shared.close()
             self.shared.unlink()
@@ -983,6 +1028,7 @@ class WindowGenerator:
         self.started = False
 
     def release_ipc(self):
+        """Close and unlink all interprocess communication resources."""
         self.request_queue = None
         self.response_queues = []
         self.game_queue = None

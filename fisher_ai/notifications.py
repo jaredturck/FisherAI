@@ -1,3 +1,5 @@
+"""Report completed training iterations to Discord."""
+
 import csv
 import json
 import subprocess
@@ -11,11 +13,12 @@ WEBHOOK_NAME = "STATUS_WEBHOOK"
 
 
 def load_webhook_url(path=None):
+    """Load the Discord webhook URL from the environment file."""
     path = Path(path or PROJECT_ROOT / ".env")
     if not path.exists():
         return ""
 
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -37,6 +40,7 @@ def load_webhook_url(path=None):
 
 
 def collect_gpu_telemetry(device):
+    """Collect a compact GPU status summary with nvidia-smi."""
     if not device.startswith("cuda"):
         return "GPU telemetry unavailable on CPU"
 
@@ -86,6 +90,8 @@ def collect_gpu_telemetry(device):
 
 
 class DiscordNotifier:
+    """Send one Discord status report after each training iteration."""
+
     def __init__(self, webhook_url=None):
         self.webhook_url = webhook_url or load_webhook_url()
 
@@ -97,6 +103,7 @@ class DiscordNotifier:
         training,
         device,
     ):
+        """Post one completed-iteration report to Discord."""
         if not self.webhook_url:
             return
 

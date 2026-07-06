@@ -1,3 +1,5 @@
+"""Run batched Monte Carlo tree search over dense array storage."""
+
 import numpy as np
 import torch
 
@@ -19,6 +21,8 @@ DIRICHLET_FRACTION = 0.25
 
 
 class TorchEvaluator:
+    """Evaluate encoded positions directly with a PyTorch network."""
+
     def __init__(self, model, device="cpu", inference_batch_size=512):
         self.model = model
         self.device = torch.device(device)
@@ -32,6 +36,7 @@ class TorchEvaluator:
         self.model.eval()
 
     def evaluate_encoded(self, encoded_states, legal_actions, legal_lengths):
+        """Evaluate encoded states and legal actions with the network."""
         batch_size = len(encoded_states)
         policies = np.zeros(
             (batch_size, legal_actions.shape[1]),
@@ -79,6 +84,8 @@ class TorchEvaluator:
 
 
 class MCTSStatePool:
+    """Store cached search states and histories in dense arrays."""
+
     def __init__(self, capacity=2048):
         self.capacity = int(capacity)
         self.count = 0
@@ -88,6 +95,7 @@ class MCTSStatePool:
         self.allocate(self.capacity)
 
     def allocate(self, capacity):
+        """Allocate dense state arrays at the requested capacity."""
         old_count = getattr(self, "count", 0)
         old_arrays = {
             name: getattr(self, name)
@@ -152,14 +160,17 @@ class MCTSStatePool:
             getattr(self, name)[:old_count] = old_array[:old_count]
 
     def reset(self):
+        """Clear the state pool while retaining allocated storage."""
         self.count = 0
         self.root_slot = NO_STATE
         self.root_hash_count = 0
 
     def grow(self):
+        """Double the dense state pool capacity."""
         self.allocate(self.capacity * 2)
 
     def allocate_slot(self):
+        """Reserve and return the next state slot."""
         if self.count >= self.capacity:
             self.grow()
         slot = self.count
@@ -167,6 +178,7 @@ class MCTSStatePool:
         return slot
 
     def write_state(self, slot, state):
+        """Store a complete game state in one dense slot."""
         board = state.board
         self.pawns[slot] = board.pawns
         self.knights[slot] = board.knights
@@ -192,6 +204,7 @@ class MCTSStatePool:
         self.repetition_count[slot] = state.repetition_count
 
     def store_root(self, state, slot=None):
+        """Store a root state and initialize its hash history."""
         if slot is None:
             slot = self.allocate_slot()
         self.write_state(slot, state)
@@ -207,6 +220,7 @@ class MCTSStatePool:
         return slot
 
     def store_child(self, state, parent_slot, position_hash):
+        """Store a child state with its inherited repetition history."""
         slot = self.allocate_slot()
         self.write_state(slot, state)
         self.parent_slot[slot] = parent_slot
@@ -214,6 +228,7 @@ class MCTSStatePool:
         return slot
 
     def repetition_count_for(self, parent_slot, position_hash):
+        """Count a position hash along one cached state path."""
         count = int(
             np.count_nonzero(
                 self.root_hashes[: self.root_hash_count] == position_hash
@@ -227,6 +242,7 @@ class MCTSStatePool:
         return count
 
     def load(self, slot, state):
+        """Restore one dense state slot into a reusable game state."""
         board = state.board
         board.pawns = int(self.pawns[slot])
         board.knights = int(self.knights[slot])
@@ -254,6 +270,8 @@ class MCTSStatePool:
 
 
 class MCTSTree:
+    """Store one Monte Carlo search tree in preallocated arrays."""
+
     def __init__(self, capacity, state_capacity=256):
         self.capacity = int(capacity)
         self.actions = np.empty(self.capacity, dtype=np.uint16)
@@ -272,17 +290,21 @@ class MCTSTree:
 
     @property
     def visit_count(self):
+        """Return the root visit count."""
         return int(self.visit_counts[self.root_index])
 
     @property
     def virtual_visit_count(self):
+        """Return the root virtual visit count."""
         return int(self.virtual_visits[self.root_index])
 
     @property
     def expanded(self):
+        """Report whether the root has allocated children."""
         return self.first_children[self.root_index] != UNEXPANDED
 
     def reset(self):
+        """Reset the tree around a new root state."""
         self.root_index = 0
         self.next_free = 1
         self.root_prior_count = 0
@@ -290,6 +312,7 @@ class MCTSTree:
         self.clear_records(0, 1)
 
     def clear_records(self, start, end):
+        """Clear a contiguous range of tree records."""
         self.visit_counts[start:end] = 0
         self.mean_values[start:end] = 0.0
         self.virtual_visits[start:end] = 0
@@ -299,10 +322,12 @@ class MCTSTree:
         self.state_slots[start:end] = NO_STATE
 
     def prepare(self, required_records):
+        """Ensure the tree can hold a required record count."""
         if self.next_free + required_records > self.capacity:
             self.reset()
 
     def cache_root_state(self, state):
+        """Cache the current root state in dense storage."""
         slot = int(self.state_slots[self.root_index])
         slot = self.state_pool.store_root(
             state,
@@ -311,12 +336,14 @@ class MCTSTree:
         self.state_slots[self.root_index] = slot
 
     def child_range(self, node_id):
+        """Return the contiguous child range for one node."""
         start = int(self.first_children[node_id])
         if start == UNEXPANDED:
             return 0, 0
         return start, start + int(self.child_counts[node_id])
 
     def allocate_children(self, node_id, actions, packed_moves, priors):
+        """Allocate and initialize all children of one node."""
         child_count = len(actions)
         start = self.next_free
         end = start + child_count
@@ -331,21 +358,26 @@ class MCTSTree:
         self.next_free = end
 
     def node_for_action(self, action):
+        """Return the root child node matching an action."""
         start, end = self.child_range(self.root_index)
         matches = np.flatnonzero(self.actions[start:end] == action)
         assert len(matches)
         return start + int(matches[0])
 
     def move_for_action(self, action):
+        """Return the packed root move matching an action."""
         return int(self.moves[self.node_for_action(action)])
 
     def advance(self, action):
+        """Reuse the selected child subtree as the new root."""
         self.root_index = self.node_for_action(action)
         self.root_prior_count = 0
         return int(self.moves[self.root_index])
 
 
 class MCTS:
+    """Run batched parallel Monte Carlo tree search."""
+
     def __init__(
         self, evaluator, simulations=128, parallel_searches=8, seed=7
     ):
@@ -370,9 +402,11 @@ class MCTS:
         )
 
     def create_tree(self):
+        """Create one search tree with the configured capacity."""
         return MCTSTree(self.tree_capacity, self.state_pool_capacity)
 
     def ensure_buffers(self, tree_count):
+        """Allocate reusable search buffers for a tree batch."""
         pending_count = max(1, tree_count * self.parallel_searches)
         if (
             tree_count <= self.buffer_tree_count
@@ -448,6 +482,7 @@ class MCTS:
         self.terminal_flags = np.empty(tree_count, dtype=np.bool_)
 
     def run(self, states, roots=None, add_noise=False):
+        """Run the configured simulations across active game states."""
         if roots is None:
             roots = [self.create_tree() for _ in states]
 
@@ -589,6 +624,7 @@ class MCTS:
         return roots
 
     def collect_active_indices(self, roots, tree_count):
+        """Collect roots that still require simulations."""
         count = 0
         for index in range(tree_count):
             root = roots[index]
@@ -604,6 +640,7 @@ class MCTS:
         return count
 
     def collect_wave_indices(self, roots, active_count):
+        """Select active roots for the next reservation wave."""
         count = 0
         for offset in range(active_count):
             index = int(self.active_indices[offset])
@@ -618,6 +655,7 @@ class MCTS:
         return count
 
     def select_leaves(self, roots, tree_indices, tree_count):
+        """Traverse active trees and reserve expandable leaves."""
         paths = self.selection_paths[:tree_count]
         path_lengths = self.selection_path_lengths[:tree_count]
         current_nodes = self.selection_nodes[:tree_count]
@@ -690,6 +728,7 @@ class MCTS:
         active_rows,
         row_count,
     ):
+        """Score and select children for multiple traversals."""
         scores = self.selection_scores[:row_count]
         visits = self.selection_visits[:row_count]
         virtual = self.selection_virtual[:row_count]
@@ -756,6 +795,7 @@ class MCTS:
         return selected
 
     def materialize_state(self, tree, path, path_length, output):
+        """Reconstruct a selected leaf state into a workspace."""
         leaf_id = int(path[path_length - 1])
         slot = int(tree.state_slots[leaf_id])
         if slot != NO_STATE:
@@ -783,7 +823,7 @@ class MCTS:
                 position_hash,
             )
             output.repetition_count = repetition_count
-            output._append_snapshot(repetition_count)
+            output.append_snapshot(repetition_count)
             parent_slot = tree.state_pool.store_child(
                 output,
                 parent_slot,
@@ -795,11 +835,13 @@ class MCTS:
 
     @staticmethod
     def fill_legal_action_data(state, actions, packed_moves):
+        """Fill reusable move and policy-action buffers for a state."""
         count, status = state.board.fill_legal_moves(packed_moves, actions)
         return count, status
 
     @staticmethod
     def legal_action_data(state):
+        """Return freshly allocated legal action data for a state."""
         actions = np.empty(MAX_LEGAL_ACTIONS, dtype=np.uint16)
         packed_moves = np.empty(MAX_LEGAL_ACTIONS, dtype=np.uint32)
         count, _ = MCTS.fill_legal_action_data(
@@ -810,6 +852,7 @@ class MCTS:
         return actions[:count].copy(), packed_moves[:count].copy()
 
     def prepare_leaf(self, state, row):
+        """Generate terminal or inference data for one selected leaf."""
         if state.is_rule_draw():
             self.legal_lengths[row] = 0
             return 0.0
@@ -825,6 +868,7 @@ class MCTS:
         return -1.0 if status == chess.CHECKMATE else 0.0
 
     def evaluate_and_expand(self, roots, count):
+        """Evaluate pending leaves and expand their tree nodes."""
         policies, values = self.evaluator.evaluate_encoded(
             self.encoded_states[:count],
             self.legal_actions[:count],
@@ -849,6 +893,7 @@ class MCTS:
         return values
 
     def set_root_priors(self, tree, add_noise):
+        """Normalize root priors and optionally add exploration noise."""
         start, end = tree.child_range(tree.root_index)
         child_count = end - start
         tree.root_prior_count = 0
@@ -864,14 +909,17 @@ class MCTS:
 
     @staticmethod
     def reserve(tree, path, path_length):
+        """Apply virtual visits along a selected search path."""
         tree.virtual_visits[path[:path_length]] += 1
 
     @staticmethod
     def release(tree, path, path_length):
+        """Remove virtual visits from a selected search path."""
         tree.virtual_visits[path[:path_length]] -= 1
 
     @staticmethod
     def backup(tree, path, path_length, value):
+        """Backpropagate an evaluated value along a search path."""
         for position in range(path_length - 1, -1, -1):
             node_id = int(path[position])
             visits = int(tree.visit_counts[node_id])
@@ -882,12 +930,14 @@ class MCTS:
 
     @staticmethod
     def visit_counts(root):
+        """Return root actions with their visit counts."""
         start, end = root.child_range(root.root_index)
         actions = root.actions[start:end].astype(np.int64, copy=True)
         counts = root.visit_counts[start:end].astype(np.float32, copy=True)
         return actions, counts
 
     def choose_action(self, root, temperature=1.0, greedy=False):
+        """Choose a root action from search visit counts."""
         actions, counts = self.visit_counts(root)
         assert counts.sum() > 0
 

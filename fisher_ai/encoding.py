@@ -1,3 +1,5 @@
+"""Encode chess histories into neural-network input planes."""
+
 import numpy as np
 
 from fisher_ai import chess
@@ -10,6 +12,8 @@ move_to_action = chess.move_to_action
 
 
 class StateEncodingWorkspace:
+    """Reuse temporary arrays needed for batched state encoding."""
+
     def __init__(self, capacity):
         self.capacity = int(capacity)
         self.history_bitboards = np.empty(
@@ -31,6 +35,7 @@ class StateEncodingWorkspace:
 
 
 def bitboards_to_planes(bitboards):
+    """Expand packed bitboards into binary board planes."""
     bitboards = np.ascontiguousarray(bitboards, dtype=np.uint64)
     byte_shape = (*bitboards.shape, 8)
     byte_view = bitboards.view(np.uint8).reshape(byte_shape)
@@ -51,6 +56,7 @@ def encode_history_batch(
     halfmove_clocks,
     output=None,
 ):
+    """Encode aligned position histories into network input planes."""
     history_bitboards = np.asarray(history_bitboards, dtype=np.uint64)
     batch_size = len(history_bitboards)
     if output is None:
@@ -135,6 +141,7 @@ def encode_history_batch(
 
 
 def encode_states(states, output=None, workspace=None):
+    """Encode a batch of live game states into one output tensor."""
     batch_size = len(states)
     if workspace is None:
         workspace = StateEncodingWorkspace(batch_size)
@@ -179,6 +186,7 @@ def encode_states(states, output=None, workspace=None):
 
 
 def encode_state(state, output=None):
+    """Encode one live game state into network input planes."""
     if output is None:
         batch_output = None
     else:
@@ -197,6 +205,7 @@ def encode_window_batch(
     halfmove_clocks,
     output=None,
 ):
+    """Encode indexed positions directly from window arrays."""
     indices = np.asarray(indices, dtype=np.int64)
     starts = np.asarray(game_starts, dtype=np.int64)[indices]
     offsets = np.arange(-7, 1, dtype=np.int64)

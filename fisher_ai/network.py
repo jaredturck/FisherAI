@@ -1,3 +1,5 @@
+"""Define the FisherAI policy and value neural network."""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,6 +14,8 @@ VALUE_HIDDEN = 128
 
 
 class SqueezeExcitation(nn.Module):
+    """Reweight residual channels with learned global context."""
+
     def __init__(self, channels, hidden_channels):
         super().__init__()
         hidden_channels = min(channels, hidden_channels)
@@ -19,6 +23,7 @@ class SqueezeExcitation(nn.Module):
         self.linear2 = nn.Linear(hidden_channels, channels * 2)
 
     def forward(self, x):
+        """Apply learned channel-wise excitation to a feature map."""
         pooled = x.mean(dim=(2, 3))
         scale_bias = self.linear2(F.relu(self.linear1(pooled)))
         scale, bias = scale_bias.chunk(2, dim=1)
@@ -28,6 +33,8 @@ class SqueezeExcitation(nn.Module):
 
 
 class ResidualBlock(nn.Module):
+    """Apply one residual convolutional block with channel attention."""
+
     def __init__(self, channels):
         super().__init__()
         self.conv1 = nn.Conv2d(channels, channels, 3, padding=1, bias=False)
@@ -40,6 +47,7 @@ class ResidualBlock(nn.Module):
         )
 
     def forward(self, x):
+        """Apply the residual block while preserving its shortcut."""
         residual = x
         x = F.relu(self.bn1(self.conv1(x)))
         x = self.bn2(self.conv2(x))
@@ -48,6 +56,8 @@ class ResidualBlock(nn.Module):
 
 
 class FisherNetwork(nn.Module):
+    """Predict policy logits and position value from encoded states."""
+
     def __init__(self):
         super().__init__()
         self.stem_conv = nn.Conv2d(
@@ -83,6 +93,7 @@ class FisherNetwork(nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self):
+        """Initialize convolutional and linear network parameters."""
         for module in self.modules():
             if isinstance(module, (nn.Conv2d, nn.Linear)):
                 nn.init.kaiming_normal_(module.weight, nonlinearity="relu")
@@ -103,6 +114,7 @@ class FisherNetwork(nn.Module):
         nn.init.zeros_(self.value_linear2.bias)
 
     def forward(self, x):
+        """Return policy logits and value predictions for a state batch."""
         x = F.relu(self.stem_bn(self.stem_conv(x)))
         x = self.residual_tower(x)
 

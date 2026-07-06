@@ -1,3 +1,5 @@
+"""Load and validate FisherAI runtime configuration."""
+
 import json
 from pathlib import Path
 
@@ -5,6 +7,8 @@ import torch
 
 
 class FisherConfig:
+    """Hold the runtime settings used by generation and training."""
+
     def __init__(self, **values):
         self.device = values.get("device", "cuda:0")
         self.actor_processes = values.get("actor_processes", 24)
@@ -25,6 +29,7 @@ class FisherConfig:
 
 
 def available_device(preferred):
+    """Resolve the requested compute device against available hardware."""
     if not preferred.startswith("cuda"):
         return preferred
     if not torch.cuda.is_available():
@@ -37,4 +42,5 @@ def available_device(preferred):
 
 
 def load_config(path="fisher_config.json"):
-    return FisherConfig(**json.loads(Path(path).read_text()))
+    """Load FisherAI settings from a JSON file."""
+    return FisherConfig(**json.loads(Path(path).read_text(encoding="utf-8")))

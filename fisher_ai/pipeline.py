@@ -1,3 +1,5 @@
+"""Coordinate sequential self-play generation and model training."""
+
 import gc
 from pathlib import Path
 
@@ -12,6 +14,8 @@ from fisher_ai.trainer import AlphaZeroTrainer
 
 
 class TrainingPipeline:
+    """Run repeated generate, train, save, and notify iterations."""
+
     def __init__(self, config_path="fisher_config.json"):
         self.config_path = str(Path(config_path).resolve())
         self.config = load_config(self.config_path)
@@ -21,6 +25,7 @@ class TrainingPipeline:
         self.manager.ensure(FisherNetwork())
 
     def run_iteration(self, iteration):
+        """Generate, train, save, and report one outer iteration."""
         checkpoint_path = self.manager.latest_path()
         print(
             f"Iteration {iteration}: generating "
@@ -74,6 +79,7 @@ class TrainingPipeline:
             torch.cuda.empty_cache()
 
     def run(self, iterations=None):
+        """Run outer training iterations until the requested limit."""
         iteration = 1
         try:
             while iterations is None or iteration <= iterations:

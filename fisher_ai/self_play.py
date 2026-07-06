@@ -1,3 +1,5 @@
+"""Manage self-play sessions and construct training records."""
+
 import numpy as np
 
 from fisher_ai import chess
@@ -11,6 +13,8 @@ LATE_TEMPERATURE = 0.1
 
 
 class SelfPlaySession:
+    """Track one active game and its accumulated search targets."""
+
     def __init__(self, tree):
         self.state = GameState()
         self.root = tree
@@ -39,6 +43,7 @@ class SelfPlaySession:
         self.finished = False
 
     def add_search_sample(self, actions, visit_counts):
+        """Record one position and its normalized search target."""
         index = self.sample_count
         length = len(actions)
         self.state.current_bitboards(self.snapshot_bitboards[index])
@@ -53,11 +58,13 @@ class SelfPlaySession:
         self.sample_count += 1
 
     def play_action(self, action):
+        """Apply one selected action and advance the reusable tree."""
         move = self.root.advance(action)
         self.state.push(move)
         self.finished = self.state.is_terminal()
 
     def build_record(self):
+        """Finalize accumulated positions into a completed game record."""
         count = self.sample_count
         result = self.state.final_result()
         values = np.where(
@@ -80,14 +87,18 @@ class SelfPlaySession:
 
 
 class SelfPlayRunner:
+    """Create and advance groups of self-play sessions."""
+
     def __init__(self, mcts, seed=7):
         self.mcts = mcts
         self.rng = np.random.default_rng(seed)
 
     def create_session(self):
+        """Create a fresh game with its own search tree."""
         return SelfPlaySession(self.mcts.create_tree())
 
     def advance_sessions(self, sessions):
+        """Search and advance every active self-play session."""
         active_indices = [
             index
             for index, session in enumerate(sessions)

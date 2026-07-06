@@ -1,3 +1,5 @@
+"""Train the FisherAI network on generated self-play windows."""
+
 import os
 import time
 
@@ -14,6 +16,8 @@ RANDOM_SEED = 7
 
 
 class AlphaZeroTrainer:
+    """Optimize the policy-value network over complete self-play windows."""
+
     def __init__(
         self, model, batch_size, device="cpu", checkpoint_manager=None
     ):
@@ -46,6 +50,7 @@ class AlphaZeroTrainer:
         self.rng = np.random.default_rng(RANDOM_SEED)
 
     def learning_rate(self):
+        """Return the scheduled learning rate for the current step."""
         learning_rate = LEARNING_RATES[0]
         for boundary, rate in zip(
             LEARNING_RATE_STEPS,
@@ -57,12 +62,14 @@ class AlphaZeroTrainer:
         return learning_rate
 
     def set_learning_rate(self):
+        """Apply the current scheduled rate to every optimizer group."""
         learning_rate = self.learning_rate()
         for group in self.optimizer.param_groups:
             group["lr"] = learning_rate
         return learning_rate
 
     def load_checkpoint(self, path=None):
+        """Restore model and optimizer state from a checkpoint."""
         if self.checkpoint_manager is None:
             return 0
 
@@ -83,6 +90,7 @@ class AlphaZeroTrainer:
         legal_mask,
         target_values,
     ):
+        """Compute masked policy loss and scalar value loss."""
         policy_logits, predicted_values = self.model(states)
         legal_logits = policy_logits.gather(1, legal_actions).float()
         legal_logits = legal_logits.masked_fill(~legal_mask, -1e9)
@@ -95,6 +103,7 @@ class AlphaZeroTrainer:
         return policy_loss + value_loss, policy_loss, value_loss
 
     def tensor_batch(self, batch):
+        """Transfer one NumPy training batch to device tensors."""
         tensors = [torch.from_numpy(array) for array in batch]
         if self.device.type == "cuda":
             tensors = [tensor.pin_memory() for tensor in tensors]
@@ -110,6 +119,7 @@ class AlphaZeroTrainer:
         return tensors
 
     def train_batch(self, batch):
+        """Run one mixed-precision optimizer step for a batch."""
         tensors = self.tensor_batch(batch)
         learning_rate = self.set_learning_rate()
         self.optimizer.zero_grad(set_to_none=True)
@@ -133,6 +143,7 @@ class AlphaZeroTrainer:
         )
 
     def train_window(self, window):
+        """Train for three shuffled epochs over the full window."""
         started = time.perf_counter()
         loss_total = 0.0
         policy_loss_total = 0.0
@@ -168,6 +179,7 @@ class AlphaZeroTrainer:
         }
 
     def save_checkpoint(self):
+        """Save the current model and optimizer state."""
         if self.checkpoint_manager is None:
             return None
         return self.checkpoint_manager.save(

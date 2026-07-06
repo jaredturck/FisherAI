@@ -1,3 +1,5 @@
+"""Store generated self-play positions in contiguous arrays."""
+
 import numpy as np
 
 from fisher_ai.encoding import INPUT_PLANES, encode_window_batch
@@ -5,6 +7,8 @@ from fisher_ai.mcts import MAX_LEGAL_ACTIONS
 
 
 class GameRecord:
+    """Store one completed game as contiguous training arrays."""
+
     def __init__(
         self,
         snapshot_bitboards,
@@ -40,10 +44,13 @@ class GameRecord:
 
     @property
     def position_count(self):
+        """Return the number of stored positions in the game."""
         return len(self.values)
 
 
 class InMemoryWindow:
+    """Accumulate a fixed self-play window in structure-of-arrays form."""
+
     def __init__(self, target_positions):
         self.target_positions = int(target_positions)
         self.capacity = max(1024, self.target_positions)
@@ -53,9 +60,11 @@ class InMemoryWindow:
 
     @property
     def full(self):
+        """Report whether the target window size has been reached."""
         return self.position_count >= self.target_positions
 
     def allocate(self, capacity):
+        """Allocate contiguous arrays for the requested capacity."""
         old_count = getattr(self, "position_count", 0)
         old_arrays = {
             name: getattr(self, name)
@@ -104,11 +113,13 @@ class InMemoryWindow:
             getattr(self, name)[:old_count] = old_array[:old_count]
 
     def ensure_capacity(self, required):
+        """Grow window storage to fit a required position count."""
         if required <= self.capacity:
             return
         self.allocate(max(required, self.capacity * 2))
 
     def add_game(self, game):
+        """Append every position from a completed game record."""
         self.add_arrays(
             game.snapshot_bitboards,
             game.snapshot_repetitions,
@@ -135,6 +146,7 @@ class InMemoryWindow:
         visit_counts,
         values,
     ):
+        """Append one contiguous block of generated training arrays."""
         count = len(values)
         if not count:
             return
@@ -157,11 +169,13 @@ class InMemoryWindow:
         self.game_count += 1
 
     def shuffled_indices(self, rng):
+        """Return a shuffled index for every stored position."""
         indices = np.arange(self.position_count, dtype=np.int64)
         rng.shuffle(indices)
         return indices
 
     def materialize_batch(self, indices):
+        """Gather and encode one training batch by position indices."""
         indices = np.asarray(indices, dtype=np.int64)
         batch_size = len(indices)
         states = np.empty(

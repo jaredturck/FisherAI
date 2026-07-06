@@ -1,3 +1,5 @@
+"""Save and restore the single FisherAI training checkpoint."""
+
 import os
 from pathlib import Path
 
@@ -5,6 +7,8 @@ import torch
 
 
 class CheckpointManager:
+    """Manage atomic saves and restores of the latest checkpoint."""
+
     def __init__(self, directory="checkpoints"):
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -12,14 +16,17 @@ class CheckpointManager:
         self.pending_path = self.directory / "latest.pending.pt"
 
     def latest_path(self):
+        """Return the current checkpoint path when it exists."""
         return self.path if self.path.exists() else None
 
     def ensure(self, model):
+        """Create an initial checkpoint when none exists."""
         if not self.path.exists():
             self.save(model, 0)
         return self.path
 
     def save(self, model, step, optimizer=None, scaler=None):
+        """Atomically save model and optimizer training state."""
         payload = {
             "model": model.state_dict(),
             "step": int(step),
@@ -36,6 +43,7 @@ class CheckpointManager:
     def load(
         self, model, path=None, optimizer=None, scaler=None, device="cpu"
     ):
+        """Restore model and optional optimizer state from a checkpoint."""
         path = Path(path) if path else self.latest_path()
         if path is None:
             return 0
