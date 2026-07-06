@@ -7,6 +7,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from fisher_ai.dataset import materialize_mixed_batch
+
 EPOCHS_PER_WINDOW = 3
 MOMENTUM = 0.9
 WEIGHT_DECAY = 0.0001
@@ -142,20 +144,47 @@ class AlphaZeroTrainer:
             learning_rate,
         )
 
-    def train_window(self, window):
-        """Train for three shuffled epochs over the full window."""
+    def train_window(self, window, replay_window=None, replay_ratio=0.0):
+        """Train for three epochs over fresh data and sampled replay data."""
         started = time.perf_counter()
         loss_total = 0.0
         policy_loss_total = 0.0
         value_loss_total = 0.0
         optimizer_steps = 0
         learning_rate = self.learning_rate()
+        fresh_positions = window.position_count
+        desired_replay = round(fresh_positions * float(replay_ratio))
+        replay_available = (
+            replay_window.position_count if replay_window is not None else 0
+        )
+        replay_per_epoch = min(desired_replay, replay_available)
 
         for _ in range(EPOCHS_PER_WINDOW):
-            indices = window.shuffled_indices(self.rng)
-            for start in range(0, len(indices), self.batch_size):
-                batch_indices = indices[start : start + self.batch_size]
-                batch = window.materialize_batch(batch_indices)
+            fresh_indices = np.arange(fresh_positions, dtype=np.int64)
+            replay_indices = (
+                replay_window.sample_indices(replay_per_epoch, self.rng)
+                if replay_per_epoch
+                else np.empty(0, dtype=np.int64)
+            )
+            source_flags = np.concatenate(
+                (
+                    np.zeros(fresh_positions, dtype=np.bool_),
+                    np.ones(len(replay_indices), dtype=np.bool_),
+                )
+            )
+            position_indices = np.concatenate((fresh_indices, replay_indices))
+            order = self.rng.permutation(len(position_indices))
+            source_flags = source_flags[order]
+            position_indices = position_indices[order]
+
+            for start in range(0, len(order), self.batch_size):
+                end = start + self.batch_size
+                batch = materialize_mixed_batch(
+                    window,
+                    replay_window,
+                    source_flags[start:end],
+                    position_indices[start:end],
+                )
                 loss, policy_loss, value_loss, learning_rate = (
                     self.train_batch(batch)
                 )
@@ -165,7 +194,8 @@ class AlphaZeroTrainer:
                 optimizer_steps += 1
 
         elapsed = time.perf_counter() - started
-        positions = window.position_count * EPOCHS_PER_WINDOW
+        positions_per_epoch = fresh_positions + replay_per_epoch
+        positions = positions_per_epoch * EPOCHS_PER_WINDOW
         return {
             "elapsed_seconds": elapsed,
             "epochs": EPOCHS_PER_WINDOW,
@@ -176,10 +206,12 @@ class AlphaZeroTrainer:
             "policy_loss": policy_loss_total / optimizer_steps,
             "value_loss": value_loss_total / optimizer_steps,
             "learning_rate": learning_rate,
+            "fresh_positions_per_epoch": fresh_positions,
+            "replay_positions_per_epoch": replay_per_epoch,
         }
 
-    def save_checkpoint(self):
-        """Save the current model and optimizer state."""
+    def save_checkpoint(self, cumulative_fresh_positions=0):
+        """Save the current model, optimizer, and schedule state."""
         if self.checkpoint_manager is None:
             return None
         return self.checkpoint_manager.save(
@@ -187,4 +219,5 @@ class AlphaZeroTrainer:
             self.step,
             optimizer=self.optimizer,
             scaler=self.scaler,
+            cumulative_fresh_positions=cumulative_fresh_positions,
         )

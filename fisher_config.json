@@ -7,6 +7,5 @@
   "inference_batch_wait_ms": 2.0,
   "simulations": 128,
   "parallel_searches": 8,
-  "window_positions": 50000,
   "batch_size": 2048
 }

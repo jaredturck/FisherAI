@@ -49,13 +49,30 @@ class GameRecord:
 
 
 class InMemoryWindow:
-    """Accumulate a fixed self-play window in structure-of-arrays form."""
+    """Accumulate completed games in contiguous structure-of-arrays form."""
 
-    def __init__(self, target_positions):
+    ARRAY_NAMES = (
+        "snapshot_bitboards",
+        "snapshot_repetitions",
+        "game_starts",
+        "current_colors",
+        "plies",
+        "castling_masks",
+        "halfmove_clocks",
+        "legal_lengths",
+        "legal_actions",
+        "visit_counts",
+        "values",
+    )
+
+    def __init__(self, target_positions, initial_capacity=None):
         self.target_positions = int(target_positions)
-        self.capacity = max(1024, self.target_positions)
+        if initial_capacity is None:
+            initial_capacity = self.target_positions
+        self.capacity = max(1024, int(initial_capacity))
         self.position_count = 0
         self.game_count = 0
+        self.game_ends = []
         self.allocate(self.capacity)
 
     @property
@@ -68,19 +85,7 @@ class InMemoryWindow:
         old_count = getattr(self, "position_count", 0)
         old_arrays = {
             name: getattr(self, name)
-            for name in (
-                "snapshot_bitboards",
-                "snapshot_repetitions",
-                "game_starts",
-                "current_colors",
-                "plies",
-                "castling_masks",
-                "halfmove_clocks",
-                "legal_lengths",
-                "legal_actions",
-                "visit_counts",
-                "values",
-            )
+            for name in self.ARRAY_NAMES
             if hasattr(self, name)
         }
 
@@ -146,7 +151,7 @@ class InMemoryWindow:
         visit_counts,
         values,
     ):
-        """Append one contiguous block of generated training arrays."""
+        """Append one complete game from contiguous training arrays."""
         count = len(values)
         if not count:
             return
@@ -167,6 +172,14 @@ class InMemoryWindow:
         self.values[start:end] = values
         self.position_count = end
         self.game_count += 1
+        self.game_ends.append(end)
+
+    def game_ranges(self):
+        """Yield the contiguous position range for every stored game."""
+        start = 0
+        for end in self.game_ends:
+            yield start, end
+            start = end
 
     def shuffled_indices(self, rng):
         """Return a shuffled index for every stored position."""
@@ -207,3 +220,146 @@ class InMemoryWindow:
         legal_mask = np.arange(max_legal_moves)[None, :] < lengths[:, None]
         values = self.values[indices].copy()
         return states, legal_actions, visit_counts, legal_mask, values
+
+
+class ReplayWindow(InMemoryWindow):
+    """Retain a fixed-capacity FIFO history of complete self-play games."""
+
+    def __init__(self, max_positions):
+        self.max_positions = int(max_positions)
+        self.game_iterations = []
+        super().__init__(self.max_positions, initial_capacity=1024)
+
+    @property
+    def oldest_iteration(self):
+        """Return the oldest retained source iteration when available."""
+        return self.game_iterations[0] if self.game_iterations else None
+
+    def ensure_capacity(self, required):
+        """Grow replay storage without exceeding its configured maximum."""
+        if required <= self.capacity:
+            return
+        self.allocate(
+            min(self.max_positions, max(required, self.capacity * 2))
+        )
+
+    def _drop_prefix(self, game_count):
+        """Evict the requested number of oldest complete games."""
+        if game_count <= 0:
+            return
+
+        drop_positions = self.game_ends[game_count - 1]
+        remaining = self.position_count - drop_positions
+        for name in self.ARRAY_NAMES:
+            array = getattr(self, name)
+            array[:remaining] = array[drop_positions : self.position_count]
+
+        if remaining:
+            self.game_starts[:remaining] -= drop_positions
+        self.position_count = remaining
+        self.game_count -= game_count
+        self.game_ends = [
+            end - drop_positions for end in self.game_ends[game_count:]
+        ]
+        self.game_iterations = self.game_iterations[game_count:]
+
+    def _make_room(self, incoming_positions):
+        """Evict oldest games until an incoming window fits."""
+        allowed_positions = self.max_positions - incoming_positions
+        game_count = 0
+        while (
+            game_count < self.game_count
+            and self.position_count - self.game_ends[game_count]
+            > allowed_positions
+        ):
+            game_count += 1
+        if self.position_count > allowed_positions:
+            game_count += 1
+        self._drop_prefix(min(game_count, self.game_count))
+
+    def append_window(self, window, iteration):
+        """Append every complete game and evict the oldest games first."""
+        ranges = list(window.game_ranges())
+        incoming_positions = sum(end - start for start, end in ranges)
+        if incoming_positions > self.max_positions:
+            while ranges and incoming_positions > self.max_positions:
+                start, end = ranges.pop(0)
+                incoming_positions -= end - start
+
+        self._make_room(incoming_positions)
+        for start, end in ranges:
+            self.add_arrays(
+                window.snapshot_bitboards[start:end],
+                window.snapshot_repetitions[start:end],
+                window.current_colors[start:end],
+                window.plies[start:end],
+                window.castling_masks[start:end],
+                window.halfmove_clocks[start:end],
+                window.legal_lengths[start:end],
+                window.legal_actions[start:end],
+                window.visit_counts[start:end],
+                window.values[start:end],
+            )
+            self.game_iterations.append(int(iteration))
+
+    def sample_indices(self, count, rng):
+        """Sample replay positions uniformly without replacement."""
+        count = min(int(count), self.position_count)
+        if count <= 0:
+            return np.empty(0, dtype=np.int64)
+        return rng.choice(self.position_count, size=count, replace=False)
+
+
+def materialize_mixed_batch(
+    fresh_window,
+    replay_window,
+    source_flags,
+    position_indices,
+):
+    """Materialize one shuffled batch drawn from fresh and replay data."""
+    source_flags = np.asarray(source_flags, dtype=np.bool_)
+    position_indices = np.asarray(position_indices, dtype=np.int64)
+    if not source_flags.any():
+        return fresh_window.materialize_batch(position_indices)
+    if source_flags.all():
+        return replay_window.materialize_batch(position_indices)
+
+    batch_size = len(position_indices)
+    fresh_rows = np.flatnonzero(~source_flags)
+    replay_rows = np.flatnonzero(source_flags)
+    fresh_batch = fresh_window.materialize_batch(position_indices[fresh_rows])
+    replay_batch = replay_window.materialize_batch(
+        position_indices[replay_rows]
+    )
+    max_legal_moves = max(fresh_batch[1].shape[1], replay_batch[1].shape[1])
+
+    states = np.empty(
+        (batch_size, INPUT_PLANES, 8, 8),
+        dtype=np.float16,
+    )
+    legal_actions = np.zeros(
+        (batch_size, max_legal_moves),
+        dtype=np.int64,
+    )
+    visit_counts = np.zeros(
+        (batch_size, max_legal_moves),
+        dtype=np.float32,
+    )
+    legal_mask = np.zeros(
+        (batch_size, max_legal_moves),
+        dtype=np.bool_,
+    )
+    values = np.empty(batch_size, dtype=np.float32)
+
+    for rows, batch in (
+        (fresh_rows, fresh_batch),
+        (replay_rows, replay_batch),
+    ):
+        width = batch[1].shape[1]
+        states[rows] = batch[0]
+        legal_actions[rows, :width] = batch[1]
+        visit_counts[rows, :width] = batch[2]
+        legal_mask[rows, :width] = batch[3]
+        values[rows] = batch[4]
+
+    return states, legal_actions, visit_counts, legal_mask, values

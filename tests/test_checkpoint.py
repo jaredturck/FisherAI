@@ -10,7 +10,12 @@ def test_checkpoint_manager_overwrites_one_atomic_checkpoint(tmp_path):
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
 
     manager.save(model, 4, optimizer=optimizer)
-    manager.save(model, 5, optimizer=optimizer)
+    manager.save(
+        model,
+        5,
+        optimizer=optimizer,
+        cumulative_fresh_positions=12345,
+    )
 
     assert manager.latest_path() == tmp_path / "latest.pt"
     assert not (tmp_path / "latest.pending.pt").exists()
@@ -21,5 +26,12 @@ def test_checkpoint_manager_overwrites_one_atomic_checkpoint(tmp_path):
         map_location="cpu",
         weights_only=False,
     )
-    assert set(payload) == {"model", "optimizer", "step"}
+    assert set(payload) == {
+        "model",
+        "optimizer",
+        "step",
+        "cumulative_fresh_positions",
+    }
     assert payload["step"] == 5
+    assert payload["cumulative_fresh_positions"] == 12345
+    assert manager.cumulative_fresh_positions() == 12345

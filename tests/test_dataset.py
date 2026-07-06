@@ -101,3 +101,45 @@ def test_window_uses_contiguous_structure_of_arrays():
     assert window.legal_actions.flags.c_contiguous
     assert window.visit_counts.flags.c_contiguous
     assert window.game_starts[:4].tolist() == [0, 0, 0, 0]
+
+
+def test_replay_window_evicts_oldest_complete_games():
+    from fisher_ai.dataset import ReplayWindow
+
+    replay = ReplayWindow(10)
+    first = InMemoryWindow(8)
+    first.add_game(make_record(4))
+    first.add_game(make_record(4))
+    replay.append_window(first, iteration=1)
+
+    second = InMemoryWindow(6)
+    second.add_game(make_record(6))
+    replay.append_window(second, iteration=2)
+
+    assert replay.position_count == 10
+    assert replay.game_count == 2
+    assert replay.game_ends == [4, 10]
+    assert replay.game_iterations == [1, 2]
+    assert replay.oldest_iteration == 1
+    assert replay.game_starts[:10].tolist() == [0] * 4 + [4] * 6
+
+
+def test_mixed_batch_preserves_fresh_and_replay_rows():
+    from fisher_ai.dataset import ReplayWindow, materialize_mixed_batch
+
+    fresh = InMemoryWindow(4)
+    fresh.add_game(make_record(4))
+    replay = ReplayWindow(8)
+    replay.append_window(fresh, iteration=1)
+
+    batch = materialize_mixed_batch(
+        fresh,
+        replay,
+        np.array([False, True, False, True]),
+        np.array([0, 1, 2, 3]),
+    )
+    expected_fresh = fresh.materialize_batch(np.array([0, 2]))
+    expected_replay = replay.materialize_batch(np.array([1, 3]))
+
+    np.testing.assert_array_equal(batch[0][[0, 2]], expected_fresh[0])
+    np.testing.assert_array_equal(batch[0][[1, 3]], expected_replay[0])

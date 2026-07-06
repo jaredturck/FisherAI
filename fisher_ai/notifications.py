@@ -102,6 +102,9 @@ class DiscordNotifier:
         generation,
         training,
         device,
+        cumulative_fresh_positions=None,
+        replay_positions=None,
+        replay_capacity=None,
     ):
         """Post one completed-iteration report to Discord."""
         if not self.webhook_url:
@@ -142,6 +145,16 @@ class DiscordNotifier:
                                 f"{training['positions_per_second']:.1f} "
                                 "positions/s • "
                                 f"{training['epochs']} epochs"
+                            ),
+                            "inline": False,
+                        },
+                        {
+                            "name": "Replay",
+                            "value": (
+                                f"{replay_positions or 0:,} / "
+                                f"{replay_capacity or 0:,} positions • "
+                                f"{cumulative_fresh_positions or 0:,} "
+                                "cumulative fresh"
                             ),
                             "inline": False,
                         },

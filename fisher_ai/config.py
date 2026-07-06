@@ -24,7 +24,6 @@ class FisherConfig:
         )
         self.simulations = values.get("simulations", 128)
         self.parallel_searches = values.get("parallel_searches", 8)
-        self.window_positions = values.get("window_positions", 50000)
         self.batch_size = values.get("batch_size", 2048)
 
 

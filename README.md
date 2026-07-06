@@ -5,7 +5,8 @@ loop:
 
 ```text
 Generate a fresh in-memory self-play window
-→ train on the complete window for three shuffled epochs
+→ train for three epochs on fresh positions plus sampled replay
+→ append complete fresh games to the RAM replay window
 → save checkpoints/latest.pt
 → repeat
 ```
@@ -14,12 +15,38 @@ The generation phase uses CPU actor processes and one GPU inference server.
 The training phase starts only after generation has stopped, then uses the same
 configured GPU.
 
+## Training schedule
+
+Fresh self-play windows grow with cumulative generated positions:
+
+```text
+0–100,000:       10,000 positions per iteration
+100,000–300,000: 20,000 positions per iteration
+300,000–750,000: 30,000 positions per iteration
+750,000 onward:  50,000 positions per iteration
+```
+
+The cumulative fresh-position counter is stored in the atomic model checkpoint.
+Replay remains in RAM and warms up again after a process restart.
+
+## Replay window
+
+Replay retains up to 200,000 positions using FIFO eviction by complete game.
+Every completed fresh game is inserted after training so current positions are
+not sampled twice in the same iteration. Each epoch uses all fresh positions
+and independently samples replay without replacement:
+
+```text
+10,000-position stage: replay = 0.5 × fresh
+Later stages:           replay = 1.0 × fresh
+```
+
 ## Performance architecture
 
 The self-play hot path uses packed integer moves, dense MCTS state and history
 pools, batched state encoding, two inference slots per actor, and shared-array
-completed-game transfer. Generated training data is retained in a contiguous
-structure-of-arrays window so batches are assembled through indexed gathers.
+completed-game transfer. Generated training data is retained in contiguous
+structure-of-arrays windows so batches are assembled through indexed gathers.
 
 ## Commands
 
@@ -63,11 +90,11 @@ routine tuning:
 - actor and active-game counts
 - inference batch sizes and wait time
 - MCTS simulations and parallel searches
-- generated window size
 - training batch size
 
-Network architecture, search constants, the three training epochs, checkpoint
-location, and benchmark location are fixed in code.
+Network architecture, search constants, replay policy, fresh-window schedule,
+the three training epochs, checkpoint location, and benchmark location are
+fixed in code.
 
 ## Checkpoints
 
@@ -77,8 +104,8 @@ Training stores one atomic checkpoint at:
 checkpoints/latest.pt
 ```
 
-The checkpoint contains only model weights, optimizer state, gradient-scaler
-state, and optimizer step.
+The checkpoint contains model weights, optimizer state, gradient-scaler state,
+optimizer step, and cumulative fresh-position count.
 
 ## Discord reporting
 

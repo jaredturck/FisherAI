@@ -75,3 +75,32 @@ def test_compute_loss_handles_half_precision_policy_logits():
     assert torch.isfinite(loss)
     assert torch.isfinite(policy_loss)
     assert torch.isfinite(value_loss)
+
+
+def test_trainer_samples_replay_independently_each_epoch():
+    fresh = make_window(4)
+    replay = make_window(8)
+    calls = []
+
+    def sample_indices(count, rng):
+        calls.append(count)
+        start = len(calls) - 1
+        return torch.arange(start, start + count).numpy() % 8
+
+    replay.sample_indices = sample_indices
+    trainer = AlphaZeroTrainer(
+        TinyPolicyValueModel(),
+        batch_size=3,
+        device="cpu",
+    )
+    metrics = trainer.train_window(
+        fresh,
+        replay_window=replay,
+        replay_ratio=0.5,
+    )
+
+    assert calls == [2, 2, 2]
+    assert metrics["fresh_positions_per_epoch"] == 4
+    assert metrics["replay_positions_per_epoch"] == 2
+    assert metrics["positions"] == 18
+    assert metrics["optimizer_steps"] == 6
