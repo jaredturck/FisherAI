@@ -114,10 +114,12 @@ class GameState:
     def terminal_status(self):
         if self.terminal_status_cache >= 0:
             return self.terminal_status_cache
-        if self.is_rule_draw():
-            self.terminal_status_cache = chess.STALEMATE
-            return self.terminal_status_cache
         _, status = self.board.fill_legal_moves(self.legal_move_buffer)
+        if status == chess.CHECKMATE:
+            self.terminal_status_cache = status
+            return status
+        if self.is_rule_draw():
+            status = chess.STALEMATE
         self.terminal_status_cache = status
         return status
 

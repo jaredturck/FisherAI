@@ -42,6 +42,13 @@ def test_mcts_completes_requested_simulations_with_parallel_leaves():
     assert visits.sum() == 16
 
 
+def test_checkmate_takes_precedence_over_rule_draw():
+    state = GameState(chess.Board("7k/6Q1/6K1/8/8/8/8/8 b - - 100 51"))
+
+    assert state.terminal_status() == chess.CHECKMATE
+    assert state.terminal_value() == -1.0
+
+
 def test_mcts_finds_mate_in_one():
     state = GameState(chess.Board("6k1/5Q2/6K1/8/8/8/8/8 w - - 0 1"))
     search = MCTS(
